@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Orta Doğu Olay Haritası</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #14181f; --muted: #667085; --line: #e4e7ec;
+    --chip: #f2f4f7; --accent: #1d4ed8; --shadow: 0 8px 28px rgba(16,24,40,.14);
+    --warn-bg: #fff4e5; --warn-ink: #9a5b00;
+  }
+  :root[data-theme="dark"] {
+    --bg: #0d1117; --panel: #151b23; --ink: #e6edf3; --muted: #8b98a8; --line: #263040;
+    --chip: #1d2530; --accent: #6ea8ff; --shadow: 0 8px 28px rgba(0,0,0,.5);
+    --warn-bg: #2a2110; --warn-ink: #f0b44c;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--ink);
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  #app { display: grid; grid-template-columns: 400px 1fr; height: 100%; }
+  #map { height: 100%; width: 100%; background: var(--bg); z-index: 0; }
+
+  /* ── Yan panel */
+  #panel { display: flex; flex-direction: column; background: var(--panel); border-right: 1px solid var(--line);
+           min-height: 0; z-index: 2; }
+  .head { padding: 16px 16px 10px; border-bottom: 1px solid var(--line); }
+  .title-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  h1 { font-size: 17px; margin: 0; letter-spacing: -.01em; }
+  .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .icon-btn { border: 1px solid var(--line); background: var(--chip); color: var(--ink); border-radius: 10px;
+              width: 36px; height: 36px; cursor: pointer; font-size: 16px; }
+  .icon-btn:focus-visible, .chip:focus-visible, .seg button:focus-visible, .card:focus-visible, input:focus-visible
+    { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .controls { padding: 12px 16px; border-bottom: 1px solid var(--line); display: grid; gap: 10px; }
+  .seg { display: grid; grid-template-columns: repeat(4, 1fr); background: var(--chip); border-radius: 10px; padding: 3px; }
+  .seg button { border: 0; background: transparent; color: var(--muted); padding: 7px 0; border-radius: 8px;
+                font: inherit; font-weight: 600; cursor: pointer; }
+  .seg button[aria-pressed="true"] { background: var(--panel); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,.18); }
+  .search { width: 100%; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--line);
+            background: var(--chip); color: var(--ink); font: inherit; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); background: var(--chip);
+          color: var(--ink); border-radius: 999px; padding: 5px 10px 5px 6px; font: inherit; font-size: 12.5px; cursor: pointer; }
+  .chip[aria-pressed="false"] { opacity: .45; }
+  .chip .n { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .dot { width: 18px; height: 18px; border-radius: 50%; background: var(--c); display: grid; place-items: center; flex: none; }
+  .dot svg { width: 12px; height: 12px; fill: #fff; }
+  .toggle { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); cursor: pointer; }
+
+  .stats { padding: 8px 16px; color: var(--muted); font-size: 12px; display: flex; justify-content: space-between;
+           border-bottom: 1px solid var(--line); }
+  #list { overflow-y: auto; flex: 1; min-height: 0; padding: 8px; }
+  .card { display: grid; grid-template-columns: 30px 1fr; gap: 10px; padding: 10px; border-radius: 12px; cursor: pointer;
+          border: 1px solid transparent; }
+  .card:hover, .card.active { background: var(--chip); border-color: var(--line); }
+  .card .dot { width: 28px; height: 28px; }
+  .card .dot svg { width: 16px; height: 16px; }
+  .card .top { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--muted); }
+  .card .top b { color: var(--ink); font-size: 13px; }
+  .card .ttl { margin-top: 2px; font-size: 13px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .badges { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 5px; }
+  .badge { font-size: 11px; padding: 1px 7px; border-radius: 999px; background: var(--chip); color: var(--muted); border: 1px solid var(--line); }
+  .badge.warn { background: var(--warn-bg); color: var(--warn-ink); border-color: transparent; }
+  .empty { padding: 28px 18px; text-align: center; color: var(--muted); }
+  .note { padding: 10px 16px; font-size: 11.5px; color: var(--muted); border-top: 1px solid var(--line); }
+
+  /* ── Harita işaretleri */
+  .pin { background: none; border: 0; }
+  .pin-in { width: 30px; height: 30px; border-radius: 50%; background: var(--c); display: grid; place-items: center;
+            border: 2.5px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.35); position: relative; }
+  .pin-in svg { width: 16px; height: 16px; fill: #fff; }
+  .pin-in.auto { border-style: dashed; }
+  .pin-in.fresh::after { content: ""; position: absolute; inset: -7px; border-radius: 50%; border: 2px solid var(--c);
+                         animation: pulse 1.8s ease-out infinite; }
+  @keyframes pulse { 0% { transform: scale(.7); opacity: .9; } 100% { transform: scale(1.5); opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .pin-in.fresh::after { animation: none; opacity: .5; } }
+  .marker-cluster div { font-weight: 700; }
+  .marker-cluster-small, .marker-cluster-medium, .marker-cluster-large { background: rgba(29,78,216,.25); }
+  .marker-cluster-small div, .marker-cluster-medium div, .marker-cluster-large div { background: rgba(29,78,216,.9); color: #fff; }
+
+  /* ── Açılır pencere */
+  .leaflet-popup-content-wrapper { background: var(--panel); color: var(--ink); border-radius: 14px; box-shadow: var(--shadow); }
+  .leaflet-popup-tip { background: var(--panel); }
+  .leaflet-popup-content { margin: 14px 16px; min-width: 240px; max-width: 320px; }
+  .pop-type { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; font-size: 12px; color: var(--c); }
+  .pop-ttl { font-size: 14.5px; font-weight: 650; margin: 6px 0 4px; line-height: 1.35; }
+  .pop-meta { color: var(--muted); font-size: 12px; }
+  .pop-src { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; display: grid; gap: 4px; }
+  .pop-src a { color: var(--accent); text-decoration: none; font-size: 12.5px; }
+  .pop-src a:hover { text-decoration: underline; }
+  .pop-warn { margin-top: 8px; padding: 6px 8px; border-radius: 8px; background: var(--warn-bg); color: var(--warn-ink); font-size: 11.5px; }
+
+  .legend-note { position: absolute; right: 12px; bottom: 28px; z-index: 500; background: var(--panel); color: var(--muted);
+                 border: 1px solid var(--line); border-radius: 12px; padding: 8px 10px; font-size: 11.5px; box-shadow: var(--shadow);
+                 display: grid; gap: 4px; }
+  .legend-note i { display: inline-block; width: 12px; height: 12px; border-radius: 50%; vertical-align: -2px; margin-right: 6px; }
+  .legend-note .ring { border: 2px dashed var(--muted); background: transparent; }
+  .legend-note .area { background: rgba(120,120,120,.35); border: 1px solid var(--muted); }
+  .toast { position: absolute; left: 50%; top: 14px; transform: translateX(-50%); z-index: 600; background: var(--panel);
+           color: var(--ink); border: 1px solid var(--line); border-radius: 12px; padding: 9px 14px; box-shadow: var(--shadow); display: none; }
+  .toast.show { display: block; }
+  #sheetBtn { display: none; }
+
+  /* ── Mobil: alt çekmece */
+  @media (max-width: 820px) {
+    #app { grid-template-columns: 1fr; grid-template-rows: 1fr; }
+    #panel { position: fixed; left: 0; right: 0; bottom: 0; height: 46vh; border-right: 0; border-top: 1px solid var(--line);
+             border-radius: 18px 18px 0 0; box-shadow: var(--shadow); transition: height .25s ease; }
+    #panel.collapsed { height: 112px; }
+    #panel.collapsed .controls, #panel.collapsed #list, #panel.collapsed .note, #panel.collapsed .stats { display: none; }
+    #sheetBtn { display: block; }
+    .legend-note { display: none; }
+    .leaflet-bottom { bottom: 46vh; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="panel" aria-label="Olay listesi ve filtreler">
+    <div class="head">
+      <div class="title-row">
+        <div>
+          <h1>Orta Doğu Olay Haritası</h1>
+          <div class="sub" id="updated">Yükleniyor…</div>
+        </div>
+        <div style="display:flex; gap:6px">
+          <button class="icon-btn" id="sheetBtn" aria-label="Listeyi aç/kapat">☰</button>
+          <button class="icon-btn" id="themeBtn" aria-label="Tema değiştir">◐</button>
+        </div>
+      </div>
+    </div>
+    <div class="controls">
+      <div class="seg" id="range" role="group" aria-label="Zaman aralığı">
+        <button data-h="6" aria-pressed="false">6 sa</button>
+        <button data-h="24" aria-pressed="true">24 sa</button>
+        <button data-h="72" aria-pressed="false">3 gün</button>
+        <button data-h="168" aria-pressed="false">7 gün</button>
+      </div>
+      <input class="search" id="q" type="search" placeholder="Yer veya haber ara…" aria-label="Ara">
+      <div class="chips" id="types" role="group" aria-label="Olay türleri"></div>
+      <label class="toggle"><input type="checkbox" id="hideWarn"> Yalnızca taraflı kaynakların bildirdiklerini gizle</label>
+    </div>
+    <div class="stats"><span id="count">—</span><span id="nolocNote"></span></div>
+    <div id="list" role="list"></div>
+    <div class="note">Konumlar haber metnindeki yer adlarından otomatik eşleştirilir ve <b>yaklaşıktır</b>.
+      Kesikli çerçeve: otomatik arama · Geniş daire: bölge düzeyinde belirsizlik. Taraflı veya devlet medyası kaynakları ⚠️ ile işaretlidir.</div>
+  </aside>
+  <main style="position:relative; min-height:0">
+    <div id="map" aria-label="Harita"></div>
+    <div class="toast" id="toast"></div>
+    <div class="legend-note">
+      <span><i class="ring"></i>Otomatik eşleşen konum</span>
+      <span><i class="area"></i>Bölge düzeyi (yaklaşık alan)</span>
+    </div>
+  </main>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+<script>
+const BRANCH = "main";           // deponun ana dalı (master kullanıyorsan değiştir)
+const REFRESH_MS = 5 * 60 * 1000;
+const FRESH_HOURS = 2;
+
+// <helpers>
+const SHAPES = {
+  tri:  '<polygon points="8,2 14.5,13.5 1.5,13.5"/>',
+  dia:  '<polygon points="8,1.5 14.5,8 8,14.5 1.5,8"/>',
+  star: '<polygon points="8,1 9.6,5.6 14.4,4.2 11.6,8 14.4,11.8 9.6,10.4 8,15 6.4,10.4 1.6,11.8 4.4,8 1.6,4.2 6.4,5.6"/>',
+  sq:   '<rect x="3" y="3" width="10" height="10" rx="1.5"/>',
+  x:    '<path d="M3.5 3.5L12.5 12.5M12.5 3.5L3.5 12.5" stroke="#fff" stroke-width="2.4" stroke-linecap="round" fill="none"/>',
+  ring: '<circle cx="8" cy="8" r="4.2" fill="none" stroke="#fff" stroke-width="2.2"/>'
+};
+const TYPES = {
+  hava:     { label: "Hava saldırısı",      color: "#e5484d", shape: "tri" },
+  fuze:     { label: "Füze / İHA",          color: "#f76b15", shape: "dia" },
+  patlama:  { label: "Patlama",             color: "#c98a00", shape: "star" },
+  mudahale: { label: "Müdahale / harekât",  color: "#8e4ec6", shape: "sq" },
+  suikast:  { label: "Suikast",             color: "#d6409f", shape: "x" },
+  catisma:  { label: "Saldırı / çatışma",   color: "#3e63dd", shape: "ring" }
+};
+const PRECISION = {
+  site: "Tesis / üs", city: "Şehir veya ilçe merkezi",
+  area: "Bölge düzeyi (kesin nokta bilinmiyor)", auto: "Otomatik eşleşme (yaklaşık)"
+};
+const AREA_RADIUS_M = 14000;
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function safeUrl(u) { return /^https?:\/\//i.test(u || "") ? u : "#"; }
+function svgOf(type) {
+  const t = TYPES[type] || TYPES.catisma;
+  return `<svg viewBox="0 0 16 16" aria-hidden="true">${SHAPES[t.shape]}</svg>`;
+}
+function ago(iso, now) {
+  const s = Math.max(0, ((now || Date.now()) - new Date(iso).getTime()) / 1000);
+  if (s < 90) return "az önce";
+  if (s < 3600) return Math.round(s / 60) + " dk önce";
+  if (s < 86400) return Math.round(s / 3600) + " sa önce";
+  return Math.round(s / 86400) + " gün önce";
+}
+function clock(iso) {
+  return new Date(iso).toLocaleString("tr-TR", { timeZone: "Europe/Istanbul", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+function allPartisan(e) { return e.sources.length > 0 && e.sources.every(s => s.partisan); }
+function filterEvents(events, st, now) {
+  const limit = (now || Date.now()) - st.hours * 3600 * 1000;
+  const q = st.q.trim().toLocaleLowerCase("tr");
+  return events.filter(e => {
+    if (new Date(e.updated || e.time).getTime() < limit) return false;
+    if (!st.types.has(e.type)) return false;
+    if (st.hideWarn && allPartisan(e)) return false;
+    if (q && !((e.place + " " + e.region + " " + e.title_tr + " " + e.title).toLocaleLowerCase("tr").includes(q))) return false;
+    return true;
+  }).sort((a, b) => new Date(b.updated || b.time) - new Date(a.updated || a.time));
+}
+// </helpers>
+
+const state = { hours: 24, types: new Set(Object.keys(TYPES)), q: "", hideWarn: false };
+let EVENTS = [], GENERATED = null, map, cluster, tiles, markers = new Map(), circles = [];
+
+/* ── Tema */
+const root = document.documentElement;
+function setTheme(t) {
+  root.dataset.theme = t;
+  try { localStorage.setItem("theme", t); } catch (e) {}
+  if (map) applyTiles();
+}
+(function initTheme() {
+  let t = null;
+  try { t = localStorage.getItem("theme"); } catch (e) {}
+  if (!t) t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  root.dataset.theme = t;
+})();
+document.getElementById("themeBtn").onclick = () => setTheme(root.dataset.theme === "dark" ? "light" : "dark");
+
+/* ── Harita */
+function applyTiles() {
+  if (tiles) map.removeLayer(tiles);
+  const dark = root.dataset.theme === "dark";
+  tiles = L.tileLayer(`https://{s}.basemaps.cartocdn.com/${dark ? "dark_all" : "light_all"}/{z}/{x}/{y}{r}.png`, {
+    maxZoom: 18, subdomains: "abcd",
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> katkıcıları &copy; <a href="https://carto.com/attributions">CARTO</a>'
+  }).addTo(map);
+  tiles.bringToBack();
+}
+function initMap() {
+  map = L.map("map", { center: [32.5, 40], zoom: 5, minZoom: 3, zoomControl: false, worldCopyJump: true });
+  L.control.zoom({ position: "topright" }).addTo(map);
+  applyTiles();
+  cluster = L.markerClusterGroup({ showCoverageOnHover: false, maxClusterRadius: 42, spiderfyOnMaxZoom: true, disableClusteringAtZoom: 12 });
+  map.addLayer(cluster);
+}
+
+function popupHtml(e) {
+  const t = TYPES[e.type] || TYPES.catisma;
+  const srcs = e.sources.map(s =>
+    `<a href="${esc(safeUrl(s.link))}" target="_blank" rel="noopener noreferrer">${s.partisan ? "⚠️ " : ""}${esc(s.name)} ↗</a>`).join("");
+  const warn = allPartisan(e) ? `<div class="pop-warn">Yalnızca taraflı veya devlet medyası kaynakları bildiriyor. Doğrulanmamış olabilir.</div>` : "";
+  const fail = e.tr_ok === false ? `<div class="pop-meta">Başlık çevrilemedi, orijinal dilinde.</div>` : "";
+  return `<div style="--c:${t.color}">
+    <div class="pop-type">${svgOf(e.type).replace("<svg", '<svg style="width:14px;height:14px;fill:' + t.color + '"')} ${esc(e.type_tr || t.label)}</div>
+    <div class="pop-ttl">${esc(e.title_tr || e.title)}</div>
+    <div class="pop-meta">📍 ${esc(e.place)}${e.region ? ", " + esc(e.region) : ""} · ${esc(PRECISION[e.precision] || "")}</div>
+    <div class="pop-meta">🕒 ${esc(clock(e.time))} (${esc(ago(e.updated || e.time))}) · ${e.sources.length} kaynak</div>
+    ${fail}${warn}
+    <div class="pop-src">${srcs}</div></div>`;
+}
+
+function render() {
+  const list = filterEvents(EVENTS, state);
+  cluster.clearLayers();
+  circles.forEach(c => map.removeLayer(c)); circles = [];
+  markers.clear();
+  const now = Date.now();
+  list.forEach(e => {
+    const t = TYPES[e.type] || TYPES.catisma;
+    const fresh = now - new Date(e.updated || e.time).getTime() < FRESH_HOURS * 3600 * 1000;
+    const icon = L.divIcon({
+      className: "pin", iconSize: [30, 30], iconAnchor: [15, 15], popupAnchor: [0, -16],
+      html: `<div class="pin-in ${fresh ? "fresh" : ""} ${e.precision === "auto" ? "auto" : ""}" style="--c:${t.color}">${svgOf(e.type)}</div>`
+    });
+    const m = L.marker([e.lat, e.lon], { icon, title: e.place });
+    m.bindPopup(() => popupHtml(e), { autoPanPadding: [40, 40] });
+    m.on("click", () => highlight(e.id));
+    cluster.addLayer(m);
+    markers.set(e.id, m);
+    if (e.precision === "area") {
+      circles.push(L.circle([e.lat, e.lon], { radius: AREA_RADIUS_M, color: t.color, weight: 1.5, dashArray: "4 4", fillColor: t.color, fillOpacity: .12, interactive: false }).addTo(map));
+    }
+  });
+  renderChips();
+  renderList(list);
+  document.getElementById("count").textContent = `${list.length} olay gösteriliyor`;
+  return list;
+}
+
+function renderChips() {
+  const base = filterEvents(EVENTS, { ...state, types: new Set(Object.keys(TYPES)) });
+  const counts = {}; base.forEach(e => counts[e.type] = (counts[e.type] || 0) + 1);
+  document.getElementById("types").innerHTML = Object.entries(TYPES).map(([k, t]) =>
+    `<button class="chip" data-t="${k}" aria-pressed="${state.types.has(k)}" title="${esc(t.label)}">
+       <span class="dot" style="--c:${t.color}">${svgOf(k)}</span>${esc(t.label)} <span class="n">${counts[k] || 0}</span></button>`).join("");
+}
+
+function renderList(list) {
+  const el = document.getElementById("list");
+  if (!list.length) {
+    el.innerHTML = `<div class="empty">Bu filtrelerle gösterilecek olay yok.<br>Zaman aralığını genişletmeyi veya türleri açmayı dene.</div>`;
+    return;
+  }
+  el.innerHTML = list.map(e => {
+    const t = TYPES[e.type] || TYPES.catisma;
+    return `<div class="card" role="listitem" tabindex="0" data-id="${esc(e.id)}">
+      <span class="dot" style="--c:${t.color}">${svgOf(e.type)}</span>
+      <div>
+        <div class="top"><b>${esc(e.place)}</b><span>${esc(ago(e.updated || e.time))}</span></div>
+        <div class="ttl">${esc(e.title_tr || e.title)}</div>
+        <div class="badges">
+          <span class="badge">${esc(e.type_tr || t.label)}</span>
+          <span class="badge">${e.sources.length} kaynak</span>
+          ${allPartisan(e) ? '<span class="badge warn">⚠️ yalnızca taraflı kaynak</span>' : ""}
+          ${e.precision === "area" ? '<span class="badge">bölge düzeyi</span>' : ""}
+        </div></div></div>`;
+  }).join("");
+}
+
+function highlight(id) {
+  document.querySelectorAll(".card.active").forEach(c => c.classList.remove("active"));
+  const card = document.querySelector(`.card[data-id="${CSS.escape(id)}"]`);
+  if (card) { card.classList.add("active"); card.scrollIntoView({ block: "nearest", behavior: "smooth" }); }
+}
+function focusEvent(id) {
+  const m = markers.get(id); if (!m) return;
+  highlight(id);
+  map.setView(m.getLatLng(), Math.max(map.getZoom(), 10), { animate: true });
+  setTimeout(() => cluster.zoomToShowLayer(m, () => m.openPopup()), 250);
+  if (matchMedia("(max-width: 820px)").matches) document.getElementById("panel").classList.add("collapsed");
+}
+
+function fitAll(list) {
+  if (!list.length) return;
+  const b = L.latLngBounds(list.map(e => [e.lat, e.lon]));
+  map.fitBounds(b, { padding: [60, 60], maxZoom: 8 });
+}
+
+/* ── Veri yükleme */
+function dataUrls() {
+  const urls = [];
+  const host = location.hostname, parts = location.pathname.split("/").filter(Boolean);
+  if (host.endsWith(".github.io") && parts.length) {
+    // raw adresi, Pages yeniden yayınlanmasını beklemeden en güncel veriyi verir
+    urls.push(`https://raw.githubusercontent.com/${host.split(".")[0]}/${parts[0]}/${BRANCH}/docs/events.json`);
+  }
+  urls.push("events.json");
+  return urls;
+}
+async function loadData(first) {
+  let lastErr = null;
+  for (const u of dataUrls()) {
+    try {
+      const r = await fetch(u + "?t=" + Date.now(), { cache: "no-store" });
+      if (!r.ok) throw new Error(r.status);
+      const d = await r.json();
+      EVENTS = (d.events || []).filter(e => typeof e.lat === "number" && typeof e.lon === "number" && Array.isArray(e.sources));
+      GENERATED = d.generated;
+      document.getElementById("updated").textContent =
+        `Veri: ${clock(GENERATED)} · ${EVENTS.length} olay kayıtlı`;
+      const list = render();
+      if (first) fitAll(list);
+      return;
+    } catch (e) { lastErr = e; }
+  }
+  document.getElementById("updated").textContent = "Veri yüklenemedi";
+  document.getElementById("list").innerHTML =
+    `<div class="empty">Olay verisi (events.json) bulunamadı.<br>Actions'tan <b>events</b> modunu bir kez çalıştırıp
+     bu sayfayı yenile.</div>`;
+  toast("Veri yüklenemedi");
+}
+function toast(msg) {
+  const t = document.getElementById("toast"); t.textContent = msg; t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), 3500);
+}
+
+/* ── Etkileşimler */
+document.getElementById("range").addEventListener("click", ev => {
+  const b = ev.target.closest("button"); if (!b) return;
+  state.hours = +b.dataset.h;
+  document.querySelectorAll("#range button").forEach(x => x.setAttribute("aria-pressed", x === b));
+  fitAll(render());
+});
+document.getElementById("types").addEventListener("click", ev => {
+  const b = ev.target.closest(".chip"); if (!b) return;
+  const k = b.dataset.t;
+  state.types.has(k) ? state.types.delete(k) : state.types.add(k);
+  render();
+});
+document.getElementById("q").addEventListener("input", ev => { state.q = ev.target.value; render(); });
+document.getElementById("hideWarn").addEventListener("change", ev => { state.hideWarn = ev.target.checked; render(); });
+document.getElementById("list").addEventListener("click", ev => {
+  const c = ev.target.closest(".card"); if (c) focusEvent(c.dataset.id);
+});
+document.getElementById("list").addEventListener("keydown", ev => {
+  if (ev.key === "Enter") { const c = ev.target.closest(".card"); if (c) focusEvent(c.dataset.id); }
+});
+document.getElementById("sheetBtn").onclick = () => document.getElementById("panel").classList.toggle("collapsed");
+
+if (typeof L !== "undefined") {
+  initMap();
+  loadData(true);
+  setInterval(() => loadData(false), REFRESH_MS);
+  addEventListener("resize", () => map.invalidateSize());
+} else {
+  document.getElementById("updated").textContent = "Harita kütüphanesi yüklenemedi";
+}
+</script>
+</body>
+</html>

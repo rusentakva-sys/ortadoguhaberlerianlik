@@ -13,6 +13,7 @@ Modlar:
 Ortam değişkenleri:
   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID   (zorunlu)
 """
+import atexit
 import html
 import json
 import os
@@ -41,7 +42,12 @@ DIGEST_HOURS, DIGEST_PER_SOURCE, DIGEST_MAX_ITEMS = 24, 3, 40
 ONDEMAND_HOURS, ONDEMAND_PER_SOURCE, ONDEMAND_MAX_ITEMS = 8, 2, 25
 MAX_ALERTS_PER_RUN = 10
 
-FULL_TEXT = True            # raporlarda ve uyarılarda haberin tam metni (Türkçe)
+# Tam metin ayarları. Yalnızca TÜRKÇE kaynaklar için geçerlidir (çeviri gerekmez).
+# Türkçe olmayan kaynaklar her zaman özet olarak gelir ve Türkçeye çevrilir.
+FULL_TEXT_DIGEST = True     # 07:00 gündem raporu
+FULL_TEXT_ONDEMAND = True   # "son durum nedir" raporu
+FULL_TEXT_ALERTS = True     # anlık uyarılar
+FOREIGN_SUMMARY_CHARS = 500  # Türkçe olmayan haberlerde özet uzunluğu (çeviri yükünü düşük tutar)
 FULL_TEXT_MAX_CHARS = 6000  # bundan uzun haberler kısaltılır, sonuna kaynağa yönlendirme eklenir
 SHOW_SUMMARY = True         # tam metin alınamazsa özet gösterilir
 
@@ -81,39 +87,43 @@ S(G, "Daily Sabah", "https://www.dailysabah.com/rssFeed/world", "hükümete yak�
 S(G, "Yeni Şafak", "https://www.yenisafak.com/rss?category=dunya", "hükümete yakın yayın", tr=True, flt=True)
 
 G = "İsrail kaynakları"
-S(G, "Times of Israel", "https://www.timesofisrael.com/feed/", "İsrail")
 S(G, "Jerusalem Post", "https://www.jpost.com/rss/rssfeedsfrontpage.aspx", "İsrail", flt=True)
 S(G, "Haaretz", "https://www.haaretz.com/srv/haaretz-latest-headlines", "İsrail", flt=True)
-S(G, "Israel Hayom", "https://www.israelhayom.com/feed/", "İsrail", flt=True)
 S(G, "Ynetnews", "https://www.ynetnews.com/Integration/StoryRss3082.xml", "İsrail")
 
 G = "Arap dünyası ve Filistin"
 S(G, "Middle East Eye", "https://www.middleeasteye.net/rss", "Londra merkezli")
-S(G, "Middle East Monitor", "https://www.middleeastmonitor.com/feed/", "Londra merkezli, Filistin yanlısı", partisan=True)
-S(G, "The New Arab", "https://www.newarab.com/rss", "Londra merkezli Arap yayını")
-S(G, "Mondoweiss", "https://mondoweiss.net/feed/", "ABD merkezli, Filistin yanlısı", partisan=True)
-S(G, "Arab News", "https://www.arabnews.com/rss.xml", "Suudi sahipli yayın", flt=True, partisan=True)
 S(G, "Asharq Al-Awsat", "https://english.aawsat.com/feed", "Suudi sahipli yayın", partisan=True)
-S(G, "Al Arabiya", "https://english.alarabiya.net/tools/rss", "Suudi sahipli yayın", flt=True, partisan=True)
-S(G, "The National", "https://www.thenationalnews.com/arc/outboundfeeds/rss/category/mena/?outputType=xml",
-  "BAE devlet destekli", partisan=True)
 S(G, "Al-Monitor", "https://www.al-monitor.com/rss", "ABD merkezli analiz")
 
 G = "İran ve direniş ekseni"
 S(G, "Press TV", "https://www.presstv.ir/rss.xml", "İran devlet medyası", partisan=True)
-S(G, "Tasnim", "https://www.tasnimnews.com/en/rss/feed/0/7/0/all-stories", "İran, Devrim Muhafızları bağlantılı", partisan=True)
 S(G, "IRNA", "https://en.irna.ir/rss", "İran devlet ajansı", partisan=True)
 S(G, "Tehran Times", "https://www.tehrantimes.com/rss", "İran, hükümete yakın", partisan=True)
-S(G, "Iran International", "https://www.iranintl.com/en/rss", "İran dışı muhalif yayın", partisan=True)
 S(G, "SANA", "https://sana.sy/en/?feed=rss2", "Suriye devlet ajansı", partisan=True)
 S(G, "Al Manar", "https://english.almanar.com.lb/rss", "Hizbullah medyası", partisan=True)
-S(G, "Al Mayadeen", "https://english.almayadeen.net/rss", "Lübnan merkezli, direniş ekseni çizgisi", partisan=True)
 
 G = "Analiz ve düşünce kuruluşları"
 S(G, "Crisis Group", "https://www.crisisgroup.org/rss.xml", "uluslararası düşünce kuruluşu", flt=True)
-S(G, "ISW", "https://www.understandingwar.org/rss.xml", "ABD merkezli askeri analiz", flt=True)
 S(G, "War on the Rocks", "https://warontherocks.com/feed/", "ABD merkezli güvenlik analizi", flt=True)
 S(G, "Atlantic Council", "https://www.atlanticcouncil.org/feed/", "ABD merkezli düşünce kuruluşu", flt=True)
+
+# Aşağıdaki kaynaklar GitHub sunucularından 403 (engelli), zaman aşımı veya boş yanıt verdi.
+# Kendi bilgisayarında çalıştırırsan işe yarayabilir; denemek için başındaki # işaretini kaldır.
+# (Grup değişkeni G için ilgili grup adını yukarıdan tekrar ata.)
+# S(G, "Times of Israel", "https://www.timesofisrael.com/feed/", "İsrail")
+# S(G, "Israel Hayom", "https://www.israelhayom.com/feed/", "İsrail", flt=True)
+# S(G, "Middle East Monitor", "https://www.middleeastmonitor.com/feed/", "Londra merkezli, Filistin yanlısı", partisan=True)
+# S(G, "The New Arab", "https://www.newarab.com/rss", "Londra merkezli Arap yayını")
+# S(G, "Mondoweiss", "https://mondoweiss.net/feed/", "ABD merkezli, Filistin yanlısı", partisan=True)
+# S(G, "Arab News", "https://www.arabnews.com/rss.xml", "Suudi sahipli yayın", flt=True, partisan=True)
+# S(G, "Al Arabiya", "https://english.alarabiya.net/tools/rss", "Suudi sahipli yayın", flt=True, partisan=True)
+# S(G, "The National", "https://www.thenationalnews.com/arc/outboundfeeds/rss/category/mena/?outputType=xml",
+#   "BAE devlet destekli", partisan=True)
+# S(G, "Tasnim", "https://www.tasnimnews.com/en/rss/feed/0/7/0/all-stories", "İran, Devrim Muhafızları bağlantılı", partisan=True)
+# S(G, "Iran International", "https://www.iranintl.com/en/rss", "İran dışı muhalif yayın", partisan=True)
+# S(G, "Al Mayadeen", "https://english.almayadeen.net/rss", "Lübnan merkezli, direniş ekseni çizgisi", partisan=True)
+# S(G, "ISW", "https://www.understandingwar.org/rss.xml", "ABD merkezli askeri analiz", flt=True)
 
 GROUP_TG = "Sosyal medya (doğrulanmamış)"
 if TELEGRAM_CHANNELS:
@@ -176,7 +186,7 @@ def entry_time(e):
 
 # ───────────────────────── Kaynak okuma ─────────────────────────
 def fetch_feed(src):
-    r = requests.get(src["url"], headers=UA, timeout=25)
+    r = requests.get(src["url"], headers=UA, timeout=15)
     r.raise_for_status()
     feed = feedparser.parse(r.content)
     if not feed.entries:
@@ -279,19 +289,74 @@ def is_urgent(it):
 
 
 # ───────────────────────── Çeviri (yalnızca Google Çeviri) ─────────────────────────
-# Metin olduğu gibi çevrilir; yorum, özet veya düzeltme eklenmez.
+# Metin olduğu gibi çevrilir; yorum, özet veya düzeltme eklenmez. Sağlayıcıların hepsi Google'dır:
+#   1) Resmi Cloud Translation API (GOOGLE_API_KEY tanımlıysa; bulut IP'lerinde en güvenilir yol)
+#   2) Google'ın ücretsiz uç noktası  3) Google Çeviri web arayüzü (deep-translator)
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "").strip()
+GOOGLE_MONTHLY_CHAR_LIMIT = int(os.environ.get("GOOGLE_MONTHLY_CHAR_LIMIT", "") or 450000)
+USAGE_FILE = Path("usage.json")
+_usage = None
+
+
+def _load_usage():
+    global _usage
+    if _usage is None:
+        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        try:
+            data = json.loads(USAGE_FILE.read_text())
+        except Exception:
+            data = {}
+        _usage = data if data.get("month") == month else {"month": month, "chars": 0}
+    return _usage
+
+
+def save_usage():
+    if _usage is not None:
+        USAGE_FILE.write_text(json.dumps(_usage))
+
+
+atexit.register(save_usage)
+
 _google = GoogleTranslator(source="auto", target="tr")
+
+
+def _google_official(text):
+    u = _load_usage()
+    if u["chars"] + len(text) > GOOGLE_MONTHLY_CHAR_LIMIT:
+        raise RuntimeError("aylık ücretsiz karakter sınırına ulaşıldı, resmi API atlanıyor")
+    u["chars"] += len(text)  # ücret çıkmaması için isteği saymadan önce say
+    r = requests.post(
+        "https://translation.googleapis.com/language/translate/v2",
+        params={"key": GOOGLE_API_KEY},
+        json={"q": text, "target": "tr", "format": "text"},
+        timeout=30,
+    )
+    r.raise_for_status()
+    return r.json()["data"]["translations"][0]["translatedText"]
+
+
+def _google_gtx(text):
+    r = requests.post(
+        "https://translate.googleapis.com/translate_a/single",
+        params={"client": "gtx", "sl": "auto", "tl": "tr", "dt": "t"},
+        data={"q": text}, headers=UA, timeout=30,
+    )
+    r.raise_for_status()
+    return "".join(seg[0] for seg in r.json()[0] if seg and seg[0])
 
 
 def _google_tr(text):
     return _google.translate(text)
 
 
-PROVIDERS = [("Google", _google_tr)]
+PROVIDERS = []
+if GOOGLE_API_KEY:
+    PROVIDERS.append(("Google (resmi API)", _google_official))
+PROVIDERS += [("Google (ücretsiz)", _google_gtx), ("Google (web)", _google_tr)]
 
 TR_FAIL_COUNT = 0          # çevrilemeyen metin sayısı (rapor sonunda uyarı için)
 _cache, _fail_streak, _last_call = {}, {}, {}
-MIN_INTERVAL = {"Google": 0.6}  # Google'ı art arda isteklerle yormamak için bekleme (sn)
+MIN_INTERVAL = {"Google (ücretsiz)": 0.6, "Google (web)": 0.6}  # Google'ı art arda isteklerle yormamak için bekleme (sn)
 
 
 def _looks_untranslated(src, out):
@@ -373,18 +438,38 @@ def translate_item(it, full):
     it["tr_failed"] = TR_FAIL_COUNT > before and not it["is_tr"]
 
 
+def _foreign_summary(it):
+    """Türkçe olmayan haber için kısa özet metni üretir (çevrilmeden önce)."""
+    summ = it["summary"]
+    if it.get("full_text"):  # RSS veya Telegram zaten metni vermişse ondan özet al
+        return clean_text(it["full_text"], FOREIGN_SUMMARY_CHARS)
+    duplicate = norm(summ).startswith(norm(it["title"])[:40])
+    if len(summ) < 40 or duplicate:  # özet yok ya da başlığın tekrarı: sayfadan ilk paragrafları al
+        body = fetch_full_text(it["link"])
+        if body:
+            return clean_text(body, FOREIGN_SUMMARY_CHARS)
+        return "" if duplicate or len(summ) < 40 else summ
+    return summ
+
+
 def _translate_item(it, full):
     it["title_tr"] = translate_text(it["title"], it["is_tr"])
     it["body_tr"], it["summary_tr"], it["truncated"] = "", "", False
-    summ = it["summary"]
-    if full:
-        body = it.get("full_text") or fetch_full_text(it["link"])
-        if body and len(body) > len(summ) + 100:
-            body, it["truncated"] = cut_text(body, FULL_TEXT_MAX_CHARS)
-            it["body_tr"] = translate_long(body, it["is_tr"])
-    if not it["body_tr"] and SHOW_SUMMARY and summ and len(summ) > 40 \
-            and not norm(summ).startswith(norm(it["title"])[:40]):
-        it["summary_tr"] = translate_text(summ, it["is_tr"])
+    if it["is_tr"]:
+        # Türkçe kaynaklar: haberin tam metni, çeviri gerekmez
+        summ = it["summary"]
+        if full:
+            body = it.get("full_text") or fetch_full_text(it["link"])
+            if body and len(body) > len(summ) + 100:
+                it["body_tr"], it["truncated"] = cut_text(body, FULL_TEXT_MAX_CHARS)
+        if not it["body_tr"] and SHOW_SUMMARY and len(summ) > 40 \
+                and not norm(summ).startswith(norm(it["title"])[:40]):
+            it["summary_tr"] = summ
+    elif SHOW_SUMMARY:
+        # Türkçe olmayan kaynaklar: yalnızca özet, Türkçeye çevrilir
+        summ = _foreign_summary(it)
+        if summ:
+            it["summary_tr"] = translate_text(summ, False)
 
 
 # ───────────────────────── Telegram ─────────────────────────
@@ -443,7 +528,8 @@ def fmt(it):
         if it.get("truncated"):
             lines.append("<i>(Metin uzun olduğu için kısaltıldı, devamı için orijinal habere bakın.)</i>")
     elif it.get("summary_tr"):
-        lines += ["", html.escape(it["summary_tr"])]
+        prefix = "" if it["is_tr"] else "<b>Özet:</b> "
+        lines += ["", prefix + html.escape(it["summary_tr"])]
     if it.get("tr_failed"):
         lines.append("⚠️ Çeviri yapılamadı, metin orijinal dilinde.")
     lines.append(f'🔗 <a href="{html.escape(it["link"] or "")}">Orijinal haber</a>')
@@ -475,7 +561,7 @@ def select_items(hours, per_source, max_items):
     return sorted(picked, key=_order_key)
 
 
-def run_report(title, hours, per_source, max_items):
+def run_report(title, hours, per_source, max_items, full):
     items = select_items(hours, per_source, max_items)
     today = datetime.now(TR_TZ).strftime("%d.%m.%Y %H:%M")
     if not items:
@@ -487,7 +573,7 @@ def run_report(title, hours, per_source, max_items):
          f"⚠️ işaretli kaynaklar taraflı veya devlet medyasıdır, propaganda içerebilir.")
     last_group = None
     for it in items:
-        translate_item(it, FULL_TEXT)
+        translate_item(it, full)
         head = ""
         if it["group"] != last_group:
             head = f"━━━ <b>{html.escape(it['group'])}</b> ━━━\n"
@@ -501,11 +587,11 @@ def run_report(title, hours, per_source, max_items):
 
 
 def run_digest():
-    run_report("Orta Doğu Günlük Gündem", DIGEST_HOURS, DIGEST_PER_SOURCE, DIGEST_MAX_ITEMS)
+    run_report("Orta Doğu Günlük Gündem", DIGEST_HOURS, DIGEST_PER_SOURCE, DIGEST_MAX_ITEMS, FULL_TEXT_DIGEST)
 
 
 def run_ondemand():
-    run_report("Orta Doğu Son Durum", ONDEMAND_HOURS, ONDEMAND_PER_SOURCE, ONDEMAND_MAX_ITEMS)
+    run_report("Orta Doğu Son Durum", ONDEMAND_HOURS, ONDEMAND_PER_SOURCE, ONDEMAND_MAX_ITEMS, FULL_TEXT_ONDEMAND)
 
 
 def run_alert():
@@ -515,7 +601,7 @@ def run_alert():
     to_send = [] if first_run else [it for it in new_items if relevant(it) and is_urgent(it)]
     to_send = to_send[:MAX_ALERTS_PER_RUN]
     for it in to_send:
-        translate_item(it, FULL_TEXT)
+        translate_item(it, FULL_TEXT_ALERTS)
         send("🚨 <b>ÖNEMLİ GELİŞME</b>\n" + fmt(it))
     seen.update(it["id"] for it in new_items)
     SEEN_FILE.write_text(json.dumps(sorted(seen)[-5000:]))
@@ -598,6 +684,11 @@ def run_check():
             lines.append(f"✅ {name}: {html.escape(fn(sample))}")
         except Exception as ex:
             lines.append(f"❌ {name}: {html.escape(type(ex).__name__ + ': ' + str(ex)[:90])}")
+    if GOOGLE_API_KEY:
+        u = _load_usage()
+        lines.append(f"ℹ️ Resmi API bu ay: {u['chars']:,} / {GOOGLE_MONTHLY_CHAR_LIMIT:,} karakter")
+    else:
+        lines.append("ℹ️ GOOGLE_API_KEY tanımlı değil; yalnızca ücretsiz Google uç noktaları deneniyor")
     send("\n".join(lines))
 
 

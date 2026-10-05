@@ -35,6 +35,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           MAP_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
           EVENT: ${{ github.event_name }}

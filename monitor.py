@@ -806,18 +806,18 @@ def run_events():
     update_events(fetch_all(), notify_hours=24)
 
 
-def send_map_info():
+def send_map_info(to_channel=False):
     if not MAP_URL:
         send("Harita adresi henüz tanımlı değil (MAP_URL).", to_channel=False)
         return
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
     n = sum(1 for e in load_events() if _parse_iso(e["updated"]) >= cutoff)
-    send(f'🗺 <a href="{html.escape(MAP_URL)}">Olay haritasını aç</a>\nSon 24 saatte haritada {n} olay var.', to_channel=False)
+    send(f'🗺 <a href="{html.escape(MAP_URL)}">Olay haritasını aç</a>\nSon 24 saatte haritada {n} olay var.', to_channel=to_channel)
 
 
 # ───────────────────────── Komutlar ("son durum nedir") ─────────────────────────
 def handle_updates(updates):
-    wanted, other, want_map = False, False, False
+    wanted, other, want_map, map_to_channel = False, False, False, False
     for u in updates:
         m = u.get("message") or {}
         if str(m.get("chat", {}).get("id")) != CHAT_ID:
@@ -829,15 +829,18 @@ def handle_updates(updates):
             wanted = True
         elif any(w in text for w in MAP_WORDS):
             want_map = True
+            map_to_channel = map_to_channel or "kanal" in text  # "kanala harita" -> kanala da gönder
         else:
             other = True
     if wanted:
         send("⏳ Kaynaklar güncelleniyor ve Türkçeye çevriliyor, birkaç dakika sürebilir...", to_channel=False)
         run_ondemand()
     elif want_map:
-        send_map_info()
+        send_map_info(to_channel=map_to_channel)
+        if map_to_channel and not CHANNEL_ID:
+            send("Kanal tanımlı değil (TELEGRAM_CHANNEL_ID), bu yüzden yalnızca sana gönderdim.", to_channel=False)
     elif other:
-        send("Güncel rapor için <b>son durum nedir</b>, olay haritası için <b>harita</b> yazman yeterli. "
+        send("Güncel rapor için <b>son durum nedir</b>, olay haritası için <b>harita</b>, haritayı kanala da göndermek için <b>kanala harita</b> yaz. "
              "Her sabah 07:00'de gündemi kendiliğimden gönderirim.", to_channel=False)
 
 

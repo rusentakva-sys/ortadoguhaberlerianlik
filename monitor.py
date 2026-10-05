@@ -7,6 +7,7 @@ Modlar:
   python monitor.py report   # "son durum" raporunu elle üretir
   python monitor.py alert    # sadece anlık uyarı taraması
   python monitor.py poll     # sadece Telegram komutlarına bakar
+  python monitor.py events   # sadece olay haritası verisini (docs/events.json) günceller
   python monitor.py check    # kaynakları ve çeviri sağlayıcılarını test eder
   python monitor.py serve    # (sürekli çalışan sunucu için) her şeyi tek süreçte yapar
 
@@ -14,6 +15,7 @@ Ortam değişkenleri:
   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID   (zorunlu)
 """
 import atexit
+import hashlib
 import html
 import json
 import os
@@ -29,6 +31,8 @@ import requests
 import trafilatura
 from bs4 import BeautifulSoup
 from deep_translator import GoogleTranslator
+
+import geo
 
 # ───────────────────────── Ayarlar ─────────────────────────
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"].strip()
@@ -55,6 +59,18 @@ SHOW_SUMMARY = True         # tam metin alınamazsa özet gösterilir
 TELEGRAM_CHANNELS = []
 
 # "son durum" demenin yolları (büyük/küçük harf fark etmez)
+# Olay haritası (docs/events.json dosyasını docs/index.html okur)
+EVENTS_FILE = Path("docs/events.json")
+GEOCACHE_FILE = Path("geocache.json")
+EVENT_RETENTION_DAYS = 7           # haritada tutulan gün sayısı
+EVENT_MERGE_HOURS = 6              # aynı yer + aynı tür olaylar bu süre içinde tek olay sayılır
+EVENT_MAX = 1500
+EVENT_EXCLUDED_GROUPS = {"Analiz ve düşünce kuruluşları"}  # analizler olay sayılmaz
+GEOCODE_ONLINE = True              # sözlükte olmayan yer adlarını OpenStreetMap (Nominatim) ile ara
+GEOCODE_MAX_PER_RUN = 8
+MAP_URL = os.environ.get("MAP_URL", "").strip()
+MAP_WORDS = ["harita", "/harita"]
+
 COMMAND_WORDS = ["son durum", "durum nedir", "gündem", "gundem", "/durum", "/sondurum", "/rapor"]
 
 UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -570,7 +586,8 @@ def run_report(title, hours, per_source, max_items, full):
     n_src = len({it["source"] for it in items})
     send(f"📰 <b>{html.escape(title)}</b> – {today}\n"
          f"Son {hours} saat · {len(items)} haber · {n_src} kaynak\n"
-         f"⚠️ işaretli kaynaklar taraflı veya devlet medyasıdır, propaganda içerebilir.")
+         f"⚠️ işaretli kaynaklar taraflı veya devlet medyasıdır, propaganda içerebilir."
+         + (f'\n🗺 <a href="{html.escape(MAP_URL)}">Olay haritası</a>' if MAP_URL else ""))
     last_group = None
     for it in items:
         translate_item(it, full)
@@ -597,20 +614,160 @@ def run_ondemand():
 def run_alert():
     first_run = not SEEN_FILE.exists()
     seen = set() if first_run else set(json.loads(SEEN_FILE.read_text()))
-    new_items = [it for it in fetch_all() if it["id"] and it["id"] not in seen]
+    all_items = fetch_all()
+    new_items = [it for it in all_items if it["id"] and it["id"] not in seen]
     to_send = [] if first_run else [it for it in new_items if relevant(it) and is_urgent(it)]
     to_send = to_send[:MAX_ALERTS_PER_RUN]
     for it in to_send:
         translate_item(it, FULL_TEXT_ALERTS)
         send("🚨 <b>ÖNEMLİ GELİŞME</b>\n" + fmt(it))
+    try:
+        update_events(all_items)
+    except Exception as ex:  # harita hatası uyarıları engellemesin
+        print("Harita güncellenemedi:", type(ex).__name__, ex, file=sys.stderr)
     seen.update(it["id"] for it in new_items)
     SEEN_FILE.write_text(json.dumps(sorted(seen)[-5000:]))
     print(f"Yeni: {len(new_items)}, gönderilen: {len(to_send)}, okunamayan kaynak: {len(FAILED)}")
 
 
+# ───────────────────────── Olay haritası ─────────────────────────
+_OK_GEO_TYPES = {"city", "town", "village", "hamlet", "suburb", "neighbourhood", "quarter",
+                 "city_district", "borough", "municipality"}
+
+
+def _iso(dt):
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_iso(s):
+    return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
+def load_events():
+    try:
+        return json.loads(EVENTS_FILE.read_text(encoding="utf-8")).get("events", [])
+    except Exception:
+        return []
+
+
+def save_events(events):
+    EVENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    events.sort(key=lambda e: e["time"], reverse=True)
+    data = {"generated": _iso(datetime.now(timezone.utc)), "count": len(events[:EVENT_MAX]),
+            "events": events[:EVENT_MAX]}
+    EVENTS_FILE.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+
+
+def geocode_online(name, cache, budget):
+    """Sözlükte olmayan bir yer adını Nominatim ile arar (yalnızca Orta Doğu çerçevesi, yalnızca yerleşim türleri)."""
+    key = name.lower()
+    if key in cache:
+        return cache[key]
+    if budget[0] <= 0:
+        return None
+    budget[0] -= 1
+    try:
+        r = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": name, "format": "jsonv2", "limit": 1, "viewbox": "25,42,65,10", "bounded": 1,
+                    "accept-language": "en"},
+            headers={"User-Agent": "OrtaDoguTakip/1.0 (kisisel haber takip botu)"}, timeout=15,
+        )
+        time.sleep(1.1)  # Nominatim kullanım kuralı: saniyede en fazla 1 istek
+        r.raise_for_status()
+        res = r.json()
+        if res and res[0].get("addresstype") in _OK_GEO_TYPES:
+            cache[key] = {"lat": round(float(res[0]["lat"]), 4), "lon": round(float(res[0]["lon"]), 4)}
+        else:
+            cache[key] = None
+        return cache[key]
+    except Exception as ex:
+        print(f"Konum araması başarısız ({name}): {type(ex).__name__}", file=sys.stderr)
+        return None
+
+
+def update_events(items):
+    """Haber akışından saldırı/patlama/müdahale olaylarını ayıklayıp harita verisine ekler."""
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=EVENT_RETENTION_DAYS)
+    events = [e for e in load_events() if _parse_iso(e["time"]) >= cutoff]
+    known = {s["link"] for e in events for s in e.get("sources", [])}
+    try:
+        cache = json.loads(GEOCACHE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        cache = {}
+    cache_before = json.dumps(cache, sort_keys=True)
+    budget = [GEOCODE_MAX_PER_RUN]
+    candidates = sorted(
+        (i for i in items if i.get("time") and i["time"] >= cutoff and i["group"] not in EVENT_EXCLUDED_GROUPS
+         and i.get("link") and i["link"] not in known),
+        key=lambda i: i["time"])
+    new_n = merged_n = 0
+    for it in candidates:
+        typ = geo.classify(it["title"])
+        if not typ:
+            continue
+        places = geo.pick_places(it["title"], it["summary"])
+        if not places and GEOCODE_ONLINE and not it["is_tr"]:
+            for name in geo.candidate_names(it["title"]):
+                g = geocode_online(name, cache, budget)
+                if g:
+                    places = [{"place": name, "lat": g["lat"], "lon": g["lon"], "kind": "auto", "region": ""}]
+                    break
+        if not places:
+            continue
+        src = {"name": it["source"], "tag": it["tag"], "partisan": bool(it["partisan"]),
+               "link": it["link"], "time": _iso(it["time"])}
+        for pl in places:
+            # Aynı yer ve zaman penceresi; tür aynıysa ya da biri genel "saldırı/çatışma" ise aynı olay sayılır
+            ev = next((e for e in events if e["place"] == pl["place"]
+                       and (e["type"] == typ[0] or "catisma" in (e["type"], typ[0]))
+                       and abs((it["time"] - _parse_iso(e["updated"])).total_seconds()) <= EVENT_MERGE_HOURS * 3600),
+                      None)
+            if ev:
+                if ev["type"] == "catisma" and typ[0] != "catisma":
+                    ev["type"], ev["type_tr"] = typ  # daha belirgin tür bulundu
+                ev["sources"].append(src)
+                ev["updated"] = max(ev["updated"], src["time"])
+                merged_n += 1
+                continue
+            before = TR_FAIL_COUNT
+            title_tr = translate_text(it["title"], it["is_tr"])
+            events.append({
+                "id": hashlib.sha1((it["link"] + pl["place"]).encode()).hexdigest()[:10],
+                "time": src["time"], "updated": src["time"],
+                "type": typ[0], "type_tr": typ[1],
+                "place": pl["place"], "region": pl["region"], "lat": pl["lat"], "lon": pl["lon"],
+                "precision": pl["kind"],
+                "title": it["title"], "title_tr": title_tr, "tr_ok": TR_FAIL_COUNT == before or it["is_tr"],
+                "sources": [src],
+            })
+            new_n += 1
+        known.add(it["link"])
+    if new_n or merged_n or len(events) != len(load_events()):
+        save_events(events)
+    if json.dumps(cache, sort_keys=True) != cache_before:
+        GEOCACHE_FILE.write_text(json.dumps(cache, ensure_ascii=False, indent=0), encoding="utf-8")
+    print(f"Harita: {new_n} yeni olay, {merged_n} birleştirilen kaynak, toplam {len(events)}")
+    return new_n
+
+
+def run_events():
+    update_events(fetch_all())
+
+
+def send_map_info():
+    if not MAP_URL:
+        send("Harita adresi henüz tanımlı değil (MAP_URL).")
+        return
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    n = sum(1 for e in load_events() if _parse_iso(e["updated"]) >= cutoff)
+    send(f'🗺 <a href="{html.escape(MAP_URL)}">Olay haritasını aç</a>\nSon 24 saatte haritada {n} olay var.')
+
+
 # ───────────────────────── Komutlar ("son durum nedir") ─────────────────────────
 def handle_updates(updates):
-    wanted, other = False, False
+    wanted, other, want_map = False, False, False
     for u in updates:
         m = u.get("message") or {}
         if str(m.get("chat", {}).get("id")) != CHAT_ID:
@@ -620,13 +777,18 @@ def handle_updates(updates):
             continue
         if any(w in text for w in COMMAND_WORDS):
             wanted = True
+        elif any(w in text for w in MAP_WORDS):
+            want_map = True
         else:
             other = True
     if wanted:
         send("⏳ Kaynaklar güncelleniyor ve Türkçeye çevriliyor, birkaç dakika sürebilir...")
         run_ondemand()
+    elif want_map:
+        send_map_info()
     elif other:
-        send("Güncel rapor için <b>son durum nedir</b> yazman yeterli. Her sabah 07:00'de gündemi kendiliğimden gönderirim.")
+        send("Güncel rapor için <b>son durum nedir</b>, olay haritası için <b>harita</b> yazman yeterli. "
+             "Her sabah 07:00'de gündemi kendiliğimden gönderirim.")
 
 
 def run_poll():
@@ -699,4 +861,4 @@ if __name__ == "__main__":
         run_alert()
     else:
         {"alert": run_alert, "digest": run_digest, "report": run_ondemand, "poll": run_poll,
-         "check": run_check, "serve": serve}[mode]()
+         "check": run_check, "serve": serve, "events": run_events}[mode]()

@@ -13,6 +13,7 @@ Modlar:
 
 Ortam değişkenleri:
   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID   (zorunlu)
+  TELEGRAM_CHANNEL_ID                    (isteğe bağlı: @kanaladi veya -100... biçiminde kanal kimliği)
 """
 import atexit
 import hashlib
@@ -37,6 +38,7 @@ import geo
 # ───────────────────────── Ayarlar ─────────────────────────
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"].strip()
 CHAT_ID = str(os.environ["TELEGRAM_CHAT_ID"]).strip()
+CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID", "").strip()  # isteğe bağlı: mesajlar kanala da gönderilir
 
 SEEN_FILE = Path("seen.json")
 TR_TZ = timezone(timedelta(hours=3))
@@ -70,6 +72,10 @@ GEOCODE_ONLINE = True              # sözlükte olmayan yer adlarını OpenStree
 GEOCODE_MAX_PER_RUN = 8
 MAP_URL = os.environ.get("MAP_URL", "").strip()
 MAP_WORDS = ["harita", "/harita"]
+EVENT_NOTIFY_HOURS = 3             # son bu kadar saatte oluşan yeni olaylar Telegram'a konum pini ile bildirilir
+EVENT_NOTIFY_MAX = 8               # tek çalışmada en fazla bu kadar olay bildirimi
+PRECISION_TR = {"site": "tesis / üs", "city": "şehir veya ilçe merkezi",
+                "area": "bölge düzeyi, yaklaşık", "auto": "otomatik eşleşme, yaklaşık"}
 
 COMMAND_WORDS = ["son durum", "durum nedir", "gündem", "gundem", "/durum", "/sondurum", "/rapor"]
 
@@ -494,20 +500,30 @@ def tg_api(method, http_timeout=40, **params):
     return r.json()
 
 
-def _post_message(text, parse_mode):
-    payload = {"chat_id": CHAT_ID, "text": text, "disable_web_page_preview": True}
-    if parse_mode:
-        payload["parse_mode"] = parse_mode
+def _tg_post(method, payload):
+    r = None
     for _ in range(3):
-        r = requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json=payload, timeout=30)
-        if r.status_code == 429:
+        r = requests.post(f"https://api.telegram.org/bot{TOKEN}/{method}", json=payload, timeout=30)
+        if r.status_code == 429:  # hız sınırı: Telegram'ın söylediği kadar bekle
             time.sleep(int(r.json().get("parameters", {}).get("retry_after", 5)) + 1)
             continue
         return r
     return r
 
 
-def send(text):
+def _post_message(text, parse_mode, chat_id=None):
+    payload = {"chat_id": chat_id or CHAT_ID, "text": text, "disable_web_page_preview": True}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    return _tg_post("sendMessage", payload)
+
+
+def _targets(to_channel):
+    return [CHAT_ID] + ([CHANNEL_ID] if (to_channel and CHANNEL_ID) else [])
+
+
+def send(text, to_channel=True):
+    """Mesajı özel sohbete, tanımlıysa kanala da gönderir (komut yanıtları için to_channel=False)."""
     lines = []
     for line in text.split("\n"):
         while len(line) > 3800:
@@ -525,12 +541,23 @@ def send(text):
     if cur.strip():
         chunks.append(cur)
     for c in chunks:
-        r = _post_message(c, "HTML")
-        if not r.ok:  # biçim hatasında düz metin olarak yeniden dene
-            r = _post_message(re.sub(r"<[^>]+>", "", html.unescape(c)), None)
-            if not r.ok:
-                print("Telegram hatası:", r.text, file=sys.stderr)
-        time.sleep(1.1)  # Telegram hız sınırı
+        for chat in _targets(to_channel):
+            r = _post_message(c, "HTML", chat)
+            if not r.ok:  # biçim hatasında düz metin olarak yeniden dene
+                r = _post_message(re.sub(r"<[^>]+>", "", html.unescape(c)), None, chat)
+                if not r.ok:
+                    print(f"Telegram hatası ({'kanal' if chat == CHANNEL_ID else 'sohbet'}):", r.text, file=sys.stderr)
+        time.sleep(3.1 if CHANNEL_ID else 1.1)  # kanallarda dakikada ~20 mesaj sınırı var
+
+
+def send_venue(lat, lon, title, address, to_channel=True):
+    """Konumu Telegram'ın yerleşik harita kartı (pin) olarak gönderir."""
+    for chat in _targets(to_channel):
+        r = _tg_post("sendVenue", {"chat_id": chat, "latitude": lat, "longitude": lon,
+                                   "title": title[:60], "address": address[:100]})
+        if not r.ok:
+            print("Konum gönderilemedi:", r.text, file=sys.stderr)
+    time.sleep(3.1 if CHANNEL_ID else 1.1)
 
 
 def fmt(it):
@@ -686,7 +713,19 @@ def geocode_online(name, cache, budget):
         return None
 
 
-def update_events(items):
+def notify_event(e):
+    n = len(e["sources"])
+    warn = " · ⚠️ yalnızca taraflı kaynak" if all(x["partisan"] for x in e["sources"]) else ""
+    when = _parse_iso(e["time"]).astimezone(TR_TZ).strftime("%d.%m %H:%M")
+    links = f'<a href="{html.escape(e["sources"][0]["link"])}">Haber</a>'
+    if MAP_URL:
+        links = f'<a href="{html.escape(MAP_URL)}">🗺 Haritada gör</a> · ' + links
+    send(f'📍 <b>{html.escape(e["place"])}</b> · {html.escape(e["type_tr"])}\n'
+         f'{html.escape(e["title_tr"])}\n🕒 {when} · {n} kaynak{warn}\n{links}')
+    send_venue(e["lat"], e["lon"], e["place"], f'{e["type_tr"]} · {PRECISION_TR.get(e["precision"], "yaklaşık")}')
+
+
+def update_events(items, notify_hours=EVENT_NOTIFY_HOURS):
     """Haber akışından saldırı/patlama/müdahale olaylarını ayıklayıp harita verisine ekler."""
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=EVENT_RETENTION_DAYS)
@@ -703,6 +742,7 @@ def update_events(items):
          and i.get("link") and i["link"] not in known),
         key=lambda i: i["time"])
     new_n = merged_n = 0
+    created = []
     for it in candidates:
         typ = geo.classify(it["title"])
         if not typ:
@@ -742,6 +782,7 @@ def update_events(items):
                 "title": it["title"], "title_tr": title_tr, "tr_ok": TR_FAIL_COUNT == before or it["is_tr"],
                 "sources": [src],
             })
+            created.append(events[-1])
             new_n += 1
         known.add(it["link"])
     if new_n or merged_n or len(events) != len(load_events()):
@@ -749,20 +790,29 @@ def update_events(items):
     if json.dumps(cache, sort_keys=True) != cache_before:
         GEOCACHE_FILE.write_text(json.dumps(cache, ensure_ascii=False, indent=0), encoding="utf-8")
     print(f"Harita: {new_n} yeni olay, {merged_n} birleştirilen kaynak, toplam {len(events)}")
+    if notify_hours:  # dosya kaydedildikten sonra bildir: hata olursa aynı olay tekrar gönderilmez
+        limit = now - timedelta(hours=notify_hours)
+        recent = sorted((e for e in created if _parse_iso(e["time"]) >= limit), key=lambda e: e["time"])
+        for e in recent[-EVENT_NOTIFY_MAX:]:
+            try:
+                notify_event(e)
+            except Exception as ex:
+                print("Olay bildirimi gönderilemedi:", type(ex).__name__, file=sys.stderr)
     return new_n
 
 
 def run_events():
-    update_events(fetch_all())
+    # elle çalıştırmada (test) son 24 saatteki yeni olaylar da bildirilir
+    update_events(fetch_all(), notify_hours=24)
 
 
 def send_map_info():
     if not MAP_URL:
-        send("Harita adresi henüz tanımlı değil (MAP_URL).")
+        send("Harita adresi henüz tanımlı değil (MAP_URL).", to_channel=False)
         return
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
     n = sum(1 for e in load_events() if _parse_iso(e["updated"]) >= cutoff)
-    send(f'🗺 <a href="{html.escape(MAP_URL)}">Olay haritasını aç</a>\nSon 24 saatte haritada {n} olay var.')
+    send(f'🗺 <a href="{html.escape(MAP_URL)}">Olay haritasını aç</a>\nSon 24 saatte haritada {n} olay var.', to_channel=False)
 
 
 # ───────────────────────── Komutlar ("son durum nedir") ─────────────────────────
@@ -782,13 +832,13 @@ def handle_updates(updates):
         else:
             other = True
     if wanted:
-        send("⏳ Kaynaklar güncelleniyor ve Türkçeye çevriliyor, birkaç dakika sürebilir...")
+        send("⏳ Kaynaklar güncelleniyor ve Türkçeye çevriliyor, birkaç dakika sürebilir...", to_channel=False)
         run_ondemand()
     elif want_map:
         send_map_info()
     elif other:
         send("Güncel rapor için <b>son durum nedir</b>, olay haritası için <b>harita</b> yazman yeterli. "
-             "Her sabah 07:00'de gündemi kendiliğimden gönderirim.")
+             "Her sabah 07:00'de gündemi kendiliğimden gönderirim.", to_channel=False)
 
 
 def run_poll():
@@ -851,7 +901,16 @@ def run_check():
         lines.append(f"ℹ️ Resmi API bu ay: {u['chars']:,} / {GOOGLE_MONTHLY_CHAR_LIMIT:,} karakter")
     else:
         lines.append("ℹ️ GOOGLE_API_KEY tanımlı değil; yalnızca ücretsiz Google uç noktaları deneniyor")
-    send("\n".join(lines))
+    if CHANNEL_ID:
+        try:
+            r = _post_message("✅ Kanal bağlantısı çalışıyor.", None, CHANNEL_ID)
+            lines.append("✅ Kanala mesaj gönderildi" if r.ok else f"❌ Kanal: {html.escape(r.json().get('description', 'hata'))}")
+        except Exception as ex:
+            lines.append(f"❌ Kanal: {html.escape(type(ex).__name__)}")
+    else:
+        lines.append("ℹ️ TELEGRAM_CHANNEL_ID tanımlı değil; kanala gönderim kapalı")
+    lines.append(f"ℹ️ Harita adresi: {html.escape(MAP_URL) if MAP_URL else 'tanımlı değil'}")
+    send("\n".join(lines), to_channel=False)
 
 
 if __name__ == "__main__":

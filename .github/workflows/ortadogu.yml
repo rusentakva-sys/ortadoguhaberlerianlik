@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "run, digest, report, check veya alert"
+        description: "run, digest, report, events, check veya alert"
         default: "check"
 
 permissions:
@@ -36,6 +36,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          MAP_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
           EVENT: ${{ github.event_name }}
           SCHEDULE: ${{ github.event.schedule }}
           MODE_INPUT: ${{ github.event.inputs.mode }}
@@ -55,4 +56,6 @@ jobs:
           git config user.email "actions@github.com"
           git add seen.json || true
           git add usage.json || true
+          git add geocache.json || true
+          git add docs/events.json || true
           git diff --cached --quiet || (git commit -m "seen güncelle" && git push)

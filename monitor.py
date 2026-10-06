@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Orta Doğu takip botu -> Telegram (Türkçe, tam metin).
+"""Orta Doğu takip botu -> Telegram (Türkçe özetler).
 
 Modlar:
   python monitor.py run      # (Actions, ~10 dk'da bir) önce komutlara bakar, sonra anlık uyarıları tarar
@@ -48,14 +48,9 @@ DIGEST_HOURS, DIGEST_PER_SOURCE, DIGEST_MAX_ITEMS = 24, 3, 40
 ONDEMAND_HOURS, ONDEMAND_PER_SOURCE, ONDEMAND_MAX_ITEMS = 8, 2, 25
 MAX_ALERTS_PER_RUN = 10
 
-# Tam metin ayarları. Yalnızca TÜRKÇE kaynaklar için geçerlidir (çeviri gerekmez).
-# Türkçe olmayan kaynaklar her zaman özet olarak gelir ve Türkçeye çevrilir.
-FULL_TEXT_DIGEST = True     # 07:00 gündem raporu
-FULL_TEXT_ONDEMAND = True   # "son durum nedir" raporu
-FULL_TEXT_ALERTS = True     # anlık uyarılar
-FOREIGN_SUMMARY_CHARS = 500  # Türkçe olmayan haberlerde özet uzunluğu (çeviri yükünü düşük tutar)
-FULL_TEXT_MAX_CHARS = 6000  # bundan uzun haberler kısaltılır, sonuna kaynağa yönlendirme eklenir
-SHOW_SUMMARY = True         # tam metin alınamazsa özet gösterilir
+# Tüm haberler (Türkçe olanlar dahil) özet olarak gönderilir; Türkçe olmayanlar Türkçeye çevrilir.
+FOREIGN_SUMMARY_CHARS = 500  # özet uzunluğu (karakter)
+SHOW_SUMMARY = True          # özetleri göster
 
 # Herkese açık Telegram kanalları (kanal adı, @ olmadan). Örn: ["kanal_adi_1", "kanal_adi_2"]
 TELEGRAM_CHANNELS = []
@@ -454,9 +449,9 @@ def translate_long(text, is_tr=False):
     return "\n".join(translate_text(c.strip()) for c in chunks)
 
 
-def translate_item(it, full):
+def translate_item(it):
     before = TR_FAIL_COUNT
-    _translate_item(it, full)
+    _translate_item(it)
     it["tr_failed"] = TR_FAIL_COUNT > before and not it["is_tr"]
 
 
@@ -474,24 +469,14 @@ def _foreign_summary(it):
     return summ
 
 
-def _translate_item(it, full):
+def _translate_item(it):
+    """Başlık ve kısa özet hazırlar. Türkçe kaynaklar çevrilmez, diğerleri Türkçeye çevrilir."""
     it["title_tr"] = translate_text(it["title"], it["is_tr"])
-    it["body_tr"], it["summary_tr"], it["truncated"] = "", "", False
-    if it["is_tr"]:
-        # Türkçe kaynaklar: haberin tam metni, çeviri gerekmez
-        summ = it["summary"]
-        if full:
-            body = it.get("full_text") or fetch_full_text(it["link"])
-            if body and len(body) > len(summ) + 100:
-                it["body_tr"], it["truncated"] = cut_text(body, FULL_TEXT_MAX_CHARS)
-        if not it["body_tr"] and SHOW_SUMMARY and len(summ) > 40 \
-                and not norm(summ).startswith(norm(it["title"])[:40]):
-            it["summary_tr"] = summ
-    elif SHOW_SUMMARY:
-        # Türkçe olmayan kaynaklar: yalnızca özet, Türkçeye çevrilir
+    it["summary_tr"] = ""
+    if SHOW_SUMMARY:
         summ = _foreign_summary(it)
         if summ:
-            it["summary_tr"] = translate_text(summ, False)
+            it["summary_tr"] = translate_text(summ, it["is_tr"])
 
 
 # ───────────────────────── Telegram ─────────────────────────
@@ -566,13 +551,8 @@ def fmt(it):
     label = html.escape(it["source"]) + (f" · {html.escape(it['tag'])}" if it.get("tag") else "")
     lines = [f"🔹 <b>{html.escape(title)}</b>",
              f"🏷 {'⚠️ ' if it.get('partisan') else ''}{label}" + (f" · {when}" if when else "")]
-    if it.get("body_tr"):
-        lines += ["", html.escape(it["body_tr"])]
-        if it.get("truncated"):
-            lines.append("<i>(Metin uzun olduğu için kısaltıldı, devamı için orijinal habere bakın.)</i>")
-    elif it.get("summary_tr"):
-        prefix = "" if it["is_tr"] else "<b>Özet:</b> "
-        lines += ["", prefix + html.escape(it["summary_tr"])]
+    if it.get("summary_tr"):
+        lines += ["", "<b>Özet:</b> " + html.escape(it["summary_tr"])]
     if it.get("tr_failed"):
         lines.append("⚠️ Çeviri yapılamadı, metin orijinal dilinde.")
     lines.append(f'🔗 <a href="{html.escape(it["link"] or "")}">Orijinal haber</a>')
@@ -604,7 +584,7 @@ def select_items(hours, per_source, max_items):
     return sorted(picked, key=_order_key)
 
 
-def run_report(title, hours, per_source, max_items, full):
+def run_report(title, hours, per_source, max_items):
     items = select_items(hours, per_source, max_items)
     today = datetime.now(TR_TZ).strftime("%d.%m.%Y %H:%M")
     if not items:
@@ -617,7 +597,7 @@ def run_report(title, hours, per_source, max_items, full):
          + (f'\n🗺 <a href="{html.escape(MAP_URL)}">Olay haritası</a>' if MAP_URL else ""))
     last_group = None
     for it in items:
-        translate_item(it, full)
+        translate_item(it)
         head = ""
         if it["group"] != last_group:
             head = f"━━━ <b>{html.escape(it['group'])}</b> ━━━\n"
@@ -631,11 +611,11 @@ def run_report(title, hours, per_source, max_items, full):
 
 
 def run_digest():
-    run_report("Orta Doğu Günlük Gündem", DIGEST_HOURS, DIGEST_PER_SOURCE, DIGEST_MAX_ITEMS, FULL_TEXT_DIGEST)
+    run_report("Orta Doğu Günlük Gündem", DIGEST_HOURS, DIGEST_PER_SOURCE, DIGEST_MAX_ITEMS)
 
 
 def run_ondemand():
-    run_report("Orta Doğu Son Durum", ONDEMAND_HOURS, ONDEMAND_PER_SOURCE, ONDEMAND_MAX_ITEMS, FULL_TEXT_ONDEMAND)
+    run_report("Orta Doğu Son Durum", ONDEMAND_HOURS, ONDEMAND_PER_SOURCE, ONDEMAND_MAX_ITEMS)
 
 
 def run_alert():
@@ -646,7 +626,7 @@ def run_alert():
     to_send = [] if first_run else [it for it in new_items if relevant(it) and is_urgent(it)]
     to_send = to_send[:MAX_ALERTS_PER_RUN]
     for it in to_send:
-        translate_item(it, FULL_TEXT_ALERTS)
+        translate_item(it)
         send("🚨 <b>ÖNEMLİ GELİŞME</b>\n" + fmt(it))
     try:
         update_events(all_items)

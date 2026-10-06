@@ -111,6 +111,8 @@
   .toast { position: absolute; left: 50%; top: 14px; transform: translateX(-50%); z-index: 600; background: var(--panel);
            color: var(--ink); border: 1px solid var(--line); border-radius: 12px; padding: 9px 14px; box-shadow: var(--shadow); display: none; }
   .toast.show { display: block; }
+  .diag { margin-top: 6px; font-size: 11px; opacity: .8; }
+  .empty b { color: var(--ink); }
   #sheetBtn { display: none; }
 
   /* ── Mobil: alt çekmece */
@@ -160,7 +162,8 @@
     <div class="stats"><span id="count">—</span><span id="nolocNote"></span></div>
     <div id="list" role="list"></div>
     <div class="note">Konumlar haber metnindeki yer adlarından otomatik eşleştirilir ve <b>yaklaşıktır</b>.
-      Kesikli çerçeve: otomatik arama · Geniş daire: bölge düzeyinde belirsizlik. Taraflı veya devlet medyası kaynakları ⚠️ ile işaretlidir.</div>
+      Kesikli çerçeve: otomatik arama · Geniş daire: bölge düzeyinde belirsizlik. Taraflı veya devlet medyası kaynakları ⚠️ ile işaretlidir.
+      <div class="diag" id="diag"></div></div>
   </aside>
   <main style="position:relative; min-height:0">
     <div id="map" aria-label="Harita"></div>
@@ -222,13 +225,14 @@ function ago(iso, now) {
 function clock(iso) {
   return new Date(iso).toLocaleString("tr-TR", { timeZone: "Europe/Istanbul", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 }
+function typeOf(e) { return TYPES[e.type] ? e.type : "catisma"; }   // bilinmeyen türler genel kategoriye düşer
 function allPartisan(e) { return e.sources.length > 0 && e.sources.every(s => s.partisan); }
 function filterEvents(events, st, now) {
   const limit = (now || Date.now()) - st.hours * 3600 * 1000;
   const q = st.q.trim().toLocaleLowerCase("tr");
   return events.filter(e => {
     if (new Date(e.updated || e.time).getTime() < limit) return false;
-    if (!st.types.has(e.type)) return false;
+    if (!st.types.has(typeOf(e))) return false;
     if (st.hideWarn && allPartisan(e)) return false;
     if (q && !((e.place + " " + e.region + " " + e.title_tr + " " + e.title).toLocaleLowerCase("tr").includes(q))) return false;
     return true;
@@ -237,14 +241,34 @@ function filterEvents(events, st, now) {
 // </helpers>
 
 const state = { hours: 24, types: new Set(Object.keys(TYPES)), q: "", hideWarn: false };
-let EVENTS = [], GENERATED = null, map, cluster, tiles, markers = new Map(), circles = [];
+let EVENTS = [], GENERATED = "", map = null, cluster = null, markers = new Map(), circles = [], loadedOnce = false;
+const $ = id => document.getElementById(id);
+const root = document.documentElement;
+
+function setStatus(msg) { $("updated").textContent = msg; }
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), 4500);
+}
+function libStatus() {
+  const ok = b => b ? "✓" : "✗", hasL = typeof L !== "undefined";
+  return `Leaflet ${ok(hasL)} · Kümeleme ${ok(hasL && typeof L.markerClusterGroup === "function")} · Vektör zemin ${ok(hasL && typeof L.maplibreGL === "function")}`;
+}
+// Beklenmeyen bir hata olursa "Yükleniyor…" yazısında takılmak yerine hatayı ekranda göster
+function fatal(msg) {
+  setStatus("Hata: " + String(msg).slice(0, 110));
+  if (!EVENTS.length) {
+    $("list").innerHTML = `<div class="empty"><b>Sayfada bir hata oluştu.</b><br>${esc(msg)}<br><br>Bu ekranın görüntüsünü paylaşırsan düzeltebilirim.</div>`;
+  }
+}
+addEventListener("error", e => fatal(e.message || "bilinmeyen hata"));
+addEventListener("unhandledrejection", e => fatal((e.reason && e.reason.message) || e.reason || "bilinmeyen hata"));
 
 /* ── Tema */
-const root = document.documentElement;
 function setTheme(t) {
   root.dataset.theme = t;
   try { localStorage.setItem("theme", t); } catch (e) {}
-  if (map) applyDarkFilter();
+  if (map) { try { applyDarkFilter(); } catch (e) {} }
 }
 (function initTheme() {
   let t = null;
@@ -252,12 +276,11 @@ function setTheme(t) {
   if (!t) t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   root.dataset.theme = t;
 })();
-document.getElementById("themeBtn").onclick = () => setTheme(root.dataset.theme === "dark" ? "light" : "dark");
+$("themeBtn").onclick = () => setTheme(root.dataset.theme === "dark" ? "light" : "dark");
 
-/* ── Harita */
 // <base>
-// Latin harfli zemin: OpenFreeMap vektör haritası (anahtar gerektirmez). Etiketler name:latin → name_en → name sırasıyla
-// seçilir. Vektör zemin yüklenemezse OpenStreetMap standart zeminine (yerel yazı) otomatik dönülür.
+// Zemin zinciri: Latin harfli vektör (OpenFreeMap) → Latin harfli raster (Esri) → OpenStreetMap standart.
+// Zemin hiçbir şekilde pinlerin ve listenin yüklenmesini engellemez.
 const LATIN_EXPR = ["coalesce", ["get", "name:latin"], ["get", "name_en"], ["get", "name"]];
 const OFM_STYLE = "https://tiles.openfreemap.org/styles/positron";
 const DARK_FILTER = "invert(1) hue-rotate(180deg) brightness(.92) contrast(.9) saturate(.8)";
@@ -285,18 +308,24 @@ function applyDarkFilter() {
   if (basePane) basePane.style.filter = dark ? DARK_FILTER : "";
 }
 function syncBaseButtons() {
-  document.querySelectorAll("#base button").forEach(b => b.setAttribute("aria-pressed", b.dataset.b === baseKind));
+  const fam = baseKind === "raster" ? "raster" : "latin";
+  document.querySelectorAll("#base button").forEach(b => b.setAttribute("aria-pressed", b.dataset.b === fam));
 }
-function addRaster() {
-  baseLayer = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> katkıcıları'
-  }).addTo(map);
+function rasterLayer(kind) {
+  const cfg = kind === "esri"
+    ? { url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+        attr: "Harita: Esri, HERE, Garmin, OpenStreetMap katkıcıları" }
+    : { url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+        attr: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> katkıcıları' };
   tileErrors = 0;
-  baseLayer.on("tileerror", () => {
-    if (++tileErrors === 6) toast("Harita zemini yüklenemedi. Ağ bağlantını veya reklam engelleyiciyi kontrol et.");
+  const layer = L.tileLayer(cfg.url, { maxZoom: 19, attribution: cfg.attr }).addTo(map);
+  layer.on("tileerror", () => {
+    if (++tileErrors !== 6 || baseLayer !== layer) return;
+    if (kind === "esri") { toast("Latin harfli yedek zemin yüklenemedi, standart zemine geçildi."); setTimeout(() => setBase("raster"), 0); }
+    else toast("Harita zemini yüklenemedi. Ağ bağlantını veya reklam engelleyiciyi kontrol et.");
   });
-  baseLayer.bringToBack();
-  baseKind = "raster";
+  layer.bringToBack();
+  return layer;
 }
 function setBase(kind) {
   if (baseLayer) { try { map.removeLayer(baseLayer); } catch (e) {} baseLayer = null; }
@@ -312,28 +341,37 @@ function setBase(kind) {
       const patch = () => { ready = true; latinizeLabels(gl); };
       if (gl.loaded()) patch(); else gl.once("load", patch);
       gl.on("error", () => {
-        if (!ready && baseLayer === layer) {  // stil hiç yüklenemedi: standart zemine dön
-          toast("Latin harfli zemin yüklenemedi, standart zemine geçildi.");
-          setTimeout(() => { setBase("raster"); syncBaseButtons(); }, 0);
+        if (!ready && baseLayer === layer) {  // vektör stil yüklenemedi: Latin harfli raster yedeğine geç
+          toast("Vektör zemin yüklenemedi, yedek zemine geçildi.");
+          setTimeout(() => setBase("esri"), 0);
         }
       });
       baseLayer = layer; baseKind = "latin";
     } catch (e) { baseLayer = null; }
   }
-  if (!baseLayer) addRaster();
-  applyDarkFilter();
+  if (!baseLayer && kind !== "raster") {
+    try { baseLayer = rasterLayer("esri"); baseKind = "esri"; } catch (e) { baseLayer = null; }
+  }
+  if (!baseLayer) {
+    try { baseLayer = rasterLayer("raster"); baseKind = "raster"; } catch (e) { baseLayer = null; }
+  }
+  try { applyDarkFilter(); } catch (e) {}
   syncBaseButtons();
   return baseKind;
 }
 // </base>
+
+/* ── Harita */
 function initMap() {
   map = L.map("map", { center: [32.5, 40], zoom: 5, minZoom: 3, zoomControl: false, worldCopyJump: true });
   L.control.zoom({ position: "topright" }).addTo(map);
+  cluster = typeof L.markerClusterGroup === "function"
+    ? L.markerClusterGroup({ showCoverageOnHover: false, maxClusterRadius: 42, spiderfyOnMaxZoom: true, disableClusteringAtZoom: 12 })
+    : L.layerGroup();   // kümeleme kütüphanesi yüklenemezse pinler kümelenmeden gösterilir
+  map.addLayer(cluster);
   let pref = null;
   try { pref = localStorage.getItem("base"); } catch (e) {}
-  setBase(pref === "raster" ? "raster" : "latin");
-  cluster = L.markerClusterGroup({ showCoverageOnHover: false, maxClusterRadius: 42, spiderfyOnMaxZoom: true, disableClusteringAtZoom: 12 });
-  map.addLayer(cluster);
+  try { setBase(pref === "raster" ? "raster" : "latin"); } catch (e) { toast("Harita zemini kurulamadı, pinler yine de gösterilecek."); }
 }
 
 function popupHtml(e) {
@@ -353,42 +391,49 @@ function popupHtml(e) {
 
 function render() {
   const list = filterEvents(EVENTS, state);
-  cluster.clearLayers();
-  circles.forEach(c => map.removeLayer(c)); circles = [];
-  markers.clear();
-  const now = Date.now();
-  list.forEach(e => {
-    const t = TYPES[e.type] || TYPES.catisma;
-    const fresh = now - new Date(e.updated || e.time).getTime() < FRESH_HOURS * 3600 * 1000;
-    const icon = L.divIcon({
-      className: "pin", iconSize: [30, 30], iconAnchor: [15, 15], popupAnchor: [0, -16],
-      html: `<div class="pin-in ${fresh ? "fresh" : ""} ${e.precision === "auto" ? "auto" : ""}" style="--c:${t.color}">${svgOf(e.type)}</div>`
-    });
-    const m = L.marker([e.lat, e.lon], { icon, title: e.place });
-    m.bindPopup(() => popupHtml(e), { autoPanPadding: [40, 40] });
-    m.on("click", () => highlight(e.id));
-    cluster.addLayer(m);
-    markers.set(e.id, m);
-    if (e.precision === "area") {
-      circles.push(L.circle([e.lat, e.lon], { radius: AREA_RADIUS_M, color: t.color, weight: 1.5, dashArray: "4 4", fillColor: t.color, fillOpacity: .12, interactive: false }).addTo(map));
-    }
-  });
   renderChips();
-  renderList(list);
-  document.getElementById("count").textContent = `${list.length} olay gösteriliyor`;
+  renderList(list);                       // liste, harita olmadan da çalışır
+  let pins = 0, bad = 0;
+  if (map && cluster) {
+    cluster.clearLayers();
+    circles.forEach(c => { try { map.removeLayer(c); } catch (e) {} }); circles = [];
+    markers.clear();
+    const now = Date.now();
+    list.forEach(e => {
+      try {                               // tek bir hatalı kayıt diğer pinleri engellemesin
+        const t = TYPES[e.type] || TYPES.catisma;
+        const fresh = now - new Date(e.updated || e.time).getTime() < FRESH_HOURS * 3600 * 1000;
+        const icon = L.divIcon({
+          className: "pin", iconSize: [30, 30], iconAnchor: [15, 15], popupAnchor: [0, -16],
+          html: `<div class="pin-in ${fresh ? "fresh" : ""} ${e.precision === "auto" ? "auto" : ""}" style="--c:${t.color}">${svgOf(e.type)}</div>`
+        });
+        const m = L.marker([e.lat, e.lon], { icon, title: e.place });
+        m.bindPopup(() => popupHtml(e), { autoPanPadding: [40, 40] });
+        m.on("click", () => highlight(e.id));
+        cluster.addLayer(m);
+        markers.set(e.id, m);
+        if (e.precision === "area") {
+          circles.push(L.circle([e.lat, e.lon], { radius: AREA_RADIUS_M, color: t.color, weight: 1.5, dashArray: "4 4",
+            fillColor: t.color, fillOpacity: .12, interactive: false }).addTo(map));
+        }
+        pins++;
+      } catch (err) { bad++; console.error("Pin çizilemedi:", e, err); }
+    });
+  }
+  $("count").textContent = map ? `${list.length} olay · ${pins} pin` + (bad ? ` (${bad} çizilemedi)` : "") : `${list.length} olay (harita yüklenemedi)`;
   return list;
 }
 
 function renderChips() {
   const base = filterEvents(EVENTS, { ...state, types: new Set(Object.keys(TYPES)) });
-  const counts = {}; base.forEach(e => counts[e.type] = (counts[e.type] || 0) + 1);
-  document.getElementById("types").innerHTML = Object.entries(TYPES).map(([k, t]) =>
+  const counts = {}; base.forEach(e => counts[typeOf(e)] = (counts[typeOf(e)] || 0) + 1);
+  $("types").innerHTML = Object.entries(TYPES).map(([k, t]) =>
     `<button class="chip" data-t="${k}" aria-pressed="${state.types.has(k)}" title="${esc(t.label)}">
        <span class="dot" style="--c:${t.color}">${svgOf(k)}</span>${esc(t.label)} <span class="n">${counts[k] || 0}</span></button>`).join("");
 }
 
 function renderList(list) {
-  const el = document.getElementById("list");
+  const el = $("list");
   if (!list.length) {
     el.innerHTML = `<div class="empty">Bu filtrelerle gösterilecek olay yok.<br>Zaman aralığını genişletmeyi veya türleri açmayı dene.</div>`;
     return;
@@ -415,93 +460,109 @@ function highlight(id) {
   if (card) { card.classList.add("active"); card.scrollIntoView({ block: "nearest", behavior: "smooth" }); }
 }
 function focusEvent(id) {
-  const m = markers.get(id); if (!m) return;
+  const m = markers.get(id); if (!m || !map) return;
   highlight(id);
   map.setView(m.getLatLng(), Math.max(map.getZoom(), 10), { animate: true });
-  setTimeout(() => cluster.zoomToShowLayer(m, () => m.openPopup()), 250);
-  if (matchMedia("(max-width: 820px)").matches) document.getElementById("panel").classList.add("collapsed");
+  setTimeout(() => {
+    if (cluster && typeof cluster.zoomToShowLayer === "function") cluster.zoomToShowLayer(m, () => m.openPopup());
+    else m.openPopup();
+  }, 250);
+  if (matchMedia("(max-width: 820px)").matches) $("panel").classList.add("collapsed");
 }
-
 function fitAll(list) {
-  if (!list.length) return;
-  const b = L.latLngBounds(list.map(e => [e.lat, e.lon]));
-  map.fitBounds(b, { padding: [60, 60], maxZoom: 8 });
+  if (!map || !list.length) return;
+  map.fitBounds(L.latLngBounds(list.map(e => [e.lat, e.lon])), { padding: [60, 60], maxZoom: 8 });
 }
 
-/* ── Veri yükleme */
+/* ── Veri yükleme: aynı adres ve GitHub ham adresi paralel denenir, hangisi önce gelirse gösterilir */
 function dataUrls() {
-  const urls = [];
+  const urls = ["events.json"];
   const host = location.hostname, parts = location.pathname.split("/").filter(Boolean);
   if (host.endsWith(".github.io") && parts.length) {
-    // raw adresi, Pages yeniden yayınlanmasını beklemeden en güncel veriyi verir
     urls.push(`https://raw.githubusercontent.com/${host.split(".")[0]}/${parts[0]}/${BRANCH}/docs/events.json`);
   }
-  urls.push("events.json");
   return urls;
 }
-async function loadData(first) {
-  let lastErr = null;
-  for (const u of dataUrls()) {
-    try {
-      const r = await fetch(u + "?t=" + Date.now(), { cache: "no-store" });
-      if (!r.ok) throw new Error(r.status);
-      const d = await r.json();
-      EVENTS = (d.events || []).filter(e => typeof e.lat === "number" && typeof e.lon === "number" && Array.isArray(e.sources));
-      GENERATED = d.generated;
-      document.getElementById("updated").textContent =
-        `Veri: ${clock(GENERATED)} · ${EVENTS.length} olay kayıtlı`;
-      const list = render();
-      if (first) fitAll(list);
-      return;
-    } catch (e) { lastErr = e; }
-  }
-  document.getElementById("updated").textContent = "Veri yüklenemedi";
-  document.getElementById("list").innerHTML =
-    `<div class="empty">Olay verisi (events.json) bulunamadı.<br>Actions'tan <b>events</b> modunu bir kez çalıştırıp
-     bu sayfayı yenile.</div>`;
-  toast("Veri yüklenemedi");
+function fetchJson(url, ms) {
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), ms);
+  return fetch(url + "?t=" + Date.now(), { cache: "no-store", signal: ctl.signal })
+    .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+    .finally(() => clearTimeout(timer));
 }
-function toast(msg) {
-  const t = document.getElementById("toast"); t.textContent = msg; t.classList.add("show");
-  setTimeout(() => t.classList.remove("show"), 3500);
+function autoRange() {
+  // Son 24 saatte olay yoksa, olay içeren en küçük aralığı seç
+  let chosen = 24;
+  if (EVENTS.length) {
+    for (const h of [24, 72, 168]) { chosen = h; if (filterEvents(EVENTS, { ...state, hours: h }).length) break; }
+  }
+  state.hours = chosen;
+  document.querySelectorAll("#range button").forEach(x => x.setAttribute("aria-pressed", +x.dataset.h === chosen));
+  if (chosen !== 24) toast("Son 24 saatte olay yok, aralık genişletildi.");
+}
+function applyData(d) {
+  if (loadedOnce && d.generated && GENERATED && d.generated <= GENERATED) return;   // daha eski ya da aynı veri
+  EVENTS = (d.events || []).filter(e => typeof e.lat === "number" && typeof e.lon === "number" && Array.isArray(e.sources));
+  GENERATED = d.generated || "";
+  setStatus(`Veri: ${GENERATED ? clock(GENERATED) : "—"} · ${EVENTS.length} olay kayıtlı`);
+  const first = !loadedOnce;
+  loadedOnce = true;
+  if (first) autoRange();
+  const list = render();
+  if (first) fitAll(list);
+}
+async function loadData() {
+  const errs = [];
+  await Promise.all(dataUrls().map(u =>
+    fetchJson(u, 15000).then(d => {
+      try { applyData(d); } catch (e) { fatal("Pinler çizilemedi: " + e.message); }
+    }).catch(e => errs.push(`${u.replace(/^https?:\/\//, "").split("/")[0]}: ${e.message || e}`))
+  ));
+  if (!loadedOnce) {
+    setStatus("Veri yüklenemedi");
+    $("list").innerHTML = `<div class="empty"><b>Olay verisi (events.json) alınamadı.</b><br>${esc(errs.join(" · "))}<br><br>
+      Actions'tan <b>events</b> modunu bir kez çalıştırıp bu sayfayı yenile. Hata "HTTP 404" ise dosya henüz oluşmamıştır;
+      zaman aşımı ise ağın GitHub adreslerine erişimi engelliyor olabilir.</div>`;
+    toast("Veri yüklenemedi");
+  }
 }
 
 /* ── Etkileşimler */
-document.getElementById("range").addEventListener("click", ev => {
+$("range").addEventListener("click", ev => {
   const b = ev.target.closest("button"); if (!b) return;
   state.hours = +b.dataset.h;
   document.querySelectorAll("#range button").forEach(x => x.setAttribute("aria-pressed", x === b));
   fitAll(render());
 });
-document.getElementById("types").addEventListener("click", ev => {
+$("types").addEventListener("click", ev => {
   const b = ev.target.closest(".chip"); if (!b) return;
   const k = b.dataset.t;
   state.types.has(k) ? state.types.delete(k) : state.types.add(k);
   render();
 });
-document.getElementById("q").addEventListener("input", ev => { state.q = ev.target.value; render(); });
-document.getElementById("hideWarn").addEventListener("change", ev => { state.hideWarn = ev.target.checked; render(); });
-document.getElementById("list").addEventListener("click", ev => {
-  const c = ev.target.closest(".card"); if (c) focusEvent(c.dataset.id);
-});
-document.getElementById("list").addEventListener("keydown", ev => {
+$("q").addEventListener("input", ev => { state.q = ev.target.value; render(); });
+$("hideWarn").addEventListener("change", ev => { state.hideWarn = ev.target.checked; render(); });
+$("list").addEventListener("click", ev => { const c = ev.target.closest(".card"); if (c) focusEvent(c.dataset.id); });
+$("list").addEventListener("keydown", ev => {
   if (ev.key === "Enter") { const c = ev.target.closest(".card"); if (c) focusEvent(c.dataset.id); }
 });
-document.getElementById("base").addEventListener("click", ev => {
-  const b = ev.target.closest("button"); if (!b) return;
+$("base").addEventListener("click", ev => {
+  const b = ev.target.closest("button"); if (!b || !map) return;
   try { localStorage.setItem("base", b.dataset.b); } catch (e) {}
   setBase(b.dataset.b);
 });
-document.getElementById("sheetBtn").onclick = () => document.getElementById("panel").classList.toggle("collapsed");
+$("sheetBtn").onclick = () => $("panel").classList.toggle("collapsed");
 
+/* ── Başlat */
+$("diag").textContent = libStatus();
 if (typeof L !== "undefined") {
-  initMap();
-  loadData(true);
-  setInterval(() => loadData(false), REFRESH_MS);
-  addEventListener("resize", () => map.invalidateSize());
+  try { initMap(); } catch (e) { map = null; cluster = null; fatal("Harita kurulamadı: " + e.message); }
 } else {
-  document.getElementById("updated").textContent = "Harita kütüphanesi yüklenemedi";
+  toast("Harita kütüphanesi yüklenemedi; olaylar yalnızca listede gösterilecek.");
 }
+loadData();
+setInterval(loadData, REFRESH_MS);
+setTimeout(() => { if (!loadedOnce) setStatus("Veri hâlâ alınamadı, bağlantı bekleniyor…"); }, 8000);
+addEventListener("resize", () => { if (map) map.invalidateSize(); });
 </script>
 </body>
 </html>

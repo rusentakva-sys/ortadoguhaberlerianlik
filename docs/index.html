@@ -27,7 +27,16 @@
     padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
   }
   #app { display: grid; grid-template-columns: 400px 1fr; height: 100%; }
-  #map { height: 100%; width: 100%; background: var(--bg); z-index: 0; }
+  #map { position: absolute; inset: 0; background-color: var(--bg); z-index: 0;
+         background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px);
+         background-size: 48px 48px; }
+  .mapmsg { display: none; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 450;
+            background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 14px; padding: 12px 16px;
+            box-shadow: var(--shadow); max-width: 320px; text-align: center; font-size: 13px; pointer-events: none; }
+  .mapmsg.show { display: block; }
+  .plabel { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 1px 6px;
+            font-size: 11px; box-shadow: none; }
+  .plabel::before { display: none; }
 
   /* ── Yan panel */
   #panel { display: flex; flex-direction: column; background: var(--panel); border-right: 1px solid var(--line);
@@ -47,6 +56,7 @@
                 font: inherit; font-weight: 600; cursor: pointer; }
   .seg button[aria-pressed="true"] { background: var(--panel); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,.18); }
   .seg.two { grid-template-columns: repeat(2, 1fr); }
+  .seg.three { grid-template-columns: repeat(3, 1fr); }
   .lbl { font-size: 11.5px; color: var(--muted); margin-bottom: -4px; }
   .search { width: 100%; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--line);
             background: var(--chip); color: var(--ink); font: inherit; }
@@ -151,9 +161,10 @@
         <button data-h="168" aria-pressed="false">7 gün</button>
       </div>
       <div class="lbl">Harita zemini</div>
-      <div class="seg two" id="base" role="group" aria-label="Harita zemini">
-        <button data-b="latin" aria-pressed="true">Latin harfli</button>
-        <button data-b="raster" aria-pressed="false">Standart</button>
+      <div class="seg three" id="base" role="group" aria-label="Harita zemini">
+        <button data-b="esri" aria-pressed="true" title="Latin harfli etiketler (raster)">Latin</button>
+        <button data-b="vector" aria-pressed="false" title="Latin harfli etiketler (vektör, deneysel)">Vektör</button>
+        <button data-b="osm" aria-pressed="false" title="OpenStreetMap standart (yerel yazı)">Standart</button>
       </div>
       <input class="search" id="q" type="search" placeholder="Yer veya haber ara…" aria-label="Ara">
       <div class="chips" id="types" role="group" aria-label="Olay türleri"></div>
@@ -163,11 +174,12 @@
     <div id="list" role="list"></div>
     <div class="note">Konumlar haber metnindeki yer adlarından otomatik eşleştirilir ve <b>yaklaşıktır</b>.
       Kesikli çerçeve: otomatik arama · Geniş daire: bölge düzeyinde belirsizlik. Taraflı veya devlet medyası kaynakları ⚠️ ile işaretlidir.
-      <div class="diag" id="diag"></div></div>
+      <div class="diag" id="diag"></div><div class="diag" id="diag2"></div></div>
   </aside>
   <main style="position:relative; min-height:0">
     <div id="map" aria-label="Harita"></div>
     <div class="toast" id="toast"></div>
+    <div class="mapmsg" id="mapmsg"><b>Harita zemini yüklenemedi.</b><br>Olaylar zeminsiz gösteriliyor. Ağ bağlantını, reklam engelleyiciyi veya sol paneldeki zemin düğmelerini dene.</div>
     <div class="legend-note">
       <span><i class="ring"></i>Otomatik eşleşen konum</span>
       <span><i class="area"></i>Bölge düzeyi (yaklaşık alan)</span>
@@ -279,12 +291,16 @@ function setTheme(t) {
 $("themeBtn").onclick = () => setTheme(root.dataset.theme === "dark" ? "light" : "dark");
 
 // <base>
-// Zemin zinciri: Latin harfli vektör (OpenFreeMap) → Latin harfli raster (Esri) → OpenStreetMap standart.
+// Zemin zinciri: Latin harfli raster (Esri) → Latin harfli vektör (OpenFreeMap) → OpenStreetMap standart.
+// Her zemin için bekleme sayacı vardır: karo gelmezse otomatik olarak sıradakine geçilir.
 // Zemin hiçbir şekilde pinlerin ve listenin yüklenmesini engellemez.
 const LATIN_EXPR = ["coalesce", ["get", "name:latin"], ["get", "name_en"], ["get", "name"]];
 const OFM_STYLE = "https://tiles.openfreemap.org/styles/positron";
 const DARK_FILTER = "invert(1) hue-rotate(180deg) brightness(.92) contrast(.9) saturate(.8)";
-let baseKind = "latin", baseLayer = null, basePane = null, tileErrors = 0;
+const NEXT_BASE = { vector: "esri", esri: "osm", osm: null };
+const BASE_LABEL = { vector: "Latin vektör", esri: "Latin (Esri)", osm: "Standart (OSM)" };
+const BASE_WAIT_MS = 8000;
+let baseKind = null, baseLayer = null, basePane = null, tilesLoaded = 0, tileErrors = 0, baseTimer = null, noBase = false;
 
 function latinizeLabels(gl) {
   const st = gl.getStyle();
@@ -307,56 +323,74 @@ function applyDarkFilter() {
   basePane = paneOf(baseLayer);
   if (basePane) basePane.style.filter = dark ? DARK_FILTER : "";
 }
-function syncBaseButtons() {
-  const fam = baseKind === "raster" ? "raster" : "latin";
-  document.querySelectorAll("#base button").forEach(b => b.setAttribute("aria-pressed", b.dataset.b === fam));
+function baseInfo() {
+  if (noBase) return "Zemin: yüklenemedi (olaylar zeminsiz gösteriliyor)";
+  return "Zemin: " + (BASE_LABEL[baseKind] || "—") + (tilesLoaded ? ` · ${tilesLoaded} karo` : "");
 }
-function rasterLayer(kind) {
-  const cfg = kind === "esri"
+function syncBaseUi() {
+  document.querySelectorAll("#base button").forEach(b => b.setAttribute("aria-pressed", !noBase && b.dataset.b === baseKind));
+  const d = document.getElementById("diag2"); if (d) d.textContent = baseInfo();
+}
+function failBase(layer, why) {
+  if (baseLayer !== layer || layer._failed) return;   // eski katmandan gelen ya da tekrarlanan hata
+  layer._failed = true;
+  const next = NEXT_BASE[baseKind];
+  if (next) {
+    toast(`${BASE_LABEL[baseKind]} zemini yüklenemedi (${why}), ${BASE_LABEL[next]} deneniyor.`);
+    setTimeout(() => setBase(next), 0);
+  } else {
+    noBase = true;
+    if (typeof onNoBase === "function") onNoBase();
+    syncBaseUi();
+  }
+}
+function makeVector() {
+  if (typeof L.maplibreGL !== "function") return null;
+  const layer = L.maplibreGL({
+    style: OFM_STYLE,
+    attribution: '<a href="https://openfreemap.org" target="_blank" rel="noopener">OpenFreeMap</a> &copy; <a href="https://openmaptiles.org/" target="_blank" rel="noopener">OpenMapTiles</a> Veri: <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+  });
+  layer.addTo(map);
+  const gl = layer.getMaplibreMap();
+  layer._blank = () => { try { const c = gl.getCanvas(); return !c || !c.clientWidth || !c.clientHeight; } catch (e) { return false; } };
+  const ok = () => { layer._ok = true; latinizeLabels(gl); syncBaseUi(); };
+  if (gl.loaded()) ok(); else gl.once("load", ok);
+  gl.on("error", () => { if (!layer._ok) failBase(layer, "stil veya karo hatası"); });
+  return layer;
+}
+function makeRaster(name) {
+  const cfg = name === "esri"
     ? { url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
         attr: "Harita: Esri, HERE, Garmin, OpenStreetMap katkıcıları" }
     : { url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
         attr: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> katkıcıları' };
-  tileErrors = 0;
   const layer = L.tileLayer(cfg.url, { maxZoom: 19, attribution: cfg.attr }).addTo(map);
-  layer.on("tileerror", () => {
-    if (++tileErrors !== 6 || baseLayer !== layer) return;
-    if (kind === "esri") { toast("Latin harfli yedek zemin yüklenemedi, standart zemine geçildi."); setTimeout(() => setBase("raster"), 0); }
-    else toast("Harita zemini yüklenemedi. Ağ bağlantını veya reklam engelleyiciyi kontrol et.");
-  });
+  layer.on("tileload", () => { layer._ok = true; if (++tilesLoaded % 6 === 1) syncBaseUi(); });
+  layer.on("tileerror", () => { if (++tileErrors >= 6 && !layer._ok) failBase(layer, "karo hataları"); });
   layer.bringToBack();
   return layer;
 }
-function setBase(kind) {
+function setBase(name) {
+  clearTimeout(baseTimer);
   if (baseLayer) { try { map.removeLayer(baseLayer); } catch (e) {} baseLayer = null; }
-  if (kind === "latin" && typeof L.maplibreGL === "function") {
-    try {
-      const layer = L.maplibreGL({
-        style: OFM_STYLE,
-        attribution: '<a href="https://openfreemap.org" target="_blank" rel="noopener">OpenFreeMap</a> &copy; <a href="https://openmaptiles.org/" target="_blank" rel="noopener">OpenMapTiles</a> Veri: <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-      });
-      layer.addTo(map);
-      const gl = layer.getMaplibreMap();
-      let ready = false;
-      const patch = () => { ready = true; latinizeLabels(gl); };
-      if (gl.loaded()) patch(); else gl.once("load", patch);
-      gl.on("error", () => {
-        if (!ready && baseLayer === layer) {  // vektör stil yüklenemedi: Latin harfli raster yedeğine geç
-          toast("Vektör zemin yüklenemedi, yedek zemine geçildi.");
-          setTimeout(() => setBase("esri"), 0);
-        }
-      });
-      baseLayer = layer; baseKind = "latin";
-    } catch (e) { baseLayer = null; }
-  }
-  if (!baseLayer && kind !== "raster") {
-    try { baseLayer = rasterLayer("esri"); baseKind = "esri"; } catch (e) { baseLayer = null; }
-  }
-  if (!baseLayer) {
-    try { baseLayer = rasterLayer("raster"); baseKind = "raster"; } catch (e) { baseLayer = null; }
+  noBase = false; tilesLoaded = 0; tileErrors = 0; baseKind = name;
+  let layer = null;
+  try { layer = name === "vector" ? makeVector() : makeRaster(name); } catch (e) { layer = null; }
+  if (!layer) {                                // bu zemin kurulamadı: sıradakine geç
+    const next = NEXT_BASE[name];
+    if (next) return setBase(next);
+    noBase = true;
+    if (typeof onNoBase === "function") onNoBase();
+  } else {
+    baseLayer = layer;
+    baseTimer = setTimeout(() => {
+      if (baseLayer !== layer) return;
+      if (!layer._ok) failBase(layer, "zaman aşımı");
+      else if (layer._blank && layer._blank()) failBase(layer, "boş görüntü");
+    }, BASE_WAIT_MS);
   }
   try { applyDarkFilter(); } catch (e) {}
-  syncBaseButtons();
+  syncBaseUi();
   return baseKind;
 }
 // </base>
@@ -370,8 +404,17 @@ function initMap() {
     : L.layerGroup();   // kümeleme kütüphanesi yüklenemezse pinler kümelenmeden gösterilir
   map.addLayer(cluster);
   let pref = null;
-  try { pref = localStorage.getItem("base"); } catch (e) {}
-  try { setBase(pref === "raster" ? "raster" : "latin"); } catch (e) { toast("Harita zemini kurulamadı, pinler yine de gösterilecek."); }
+  try { pref = new URLSearchParams(location.search).get("base") || localStorage.getItem("base2"); } catch (e) {}
+  try { setBase(NEXT_BASE.hasOwnProperty(pref) ? pref : "esri"); } catch (e) { toast("Harita zemini kurulamadı, pinler yine de gösterilecek."); }
+  // Düzen oturduktan sonra harita boyutunu yeniden hesapla (boş/gri harita sorununa karşı)
+  const fixSize = () => { try { map.invalidateSize(); } catch (e) {} };
+  try { requestAnimationFrame(fixSize); } catch (e) {}
+  setTimeout(fixSize, 400);
+  try { addEventListener("load", fixSize); } catch (e) {}
+}
+function onNoBase() {
+  const m = $("mapmsg"); if (m) m.classList.add("show");
+  if (EVENTS.length) render();            // etiketlerin eklenmesi için yeniden çiz
 }
 
 function popupHtml(e) {
@@ -410,6 +453,7 @@ function render() {
         const m = L.marker([e.lat, e.lon], { icon, title: e.place });
         m.bindPopup(() => popupHtml(e), { autoPanPadding: [40, 40] });
         m.on("click", () => highlight(e.id));
+        if (noBase && pins < 40) m.bindTooltip(e.place, { permanent: true, direction: "bottom", offset: [0, 14], className: "plabel" });
         cluster.addLayer(m);
         markers.set(e.id, m);
         if (e.precision === "area") {
@@ -547,8 +591,10 @@ $("list").addEventListener("keydown", ev => {
 });
 $("base").addEventListener("click", ev => {
   const b = ev.target.closest("button"); if (!b || !map) return;
-  try { localStorage.setItem("base", b.dataset.b); } catch (e) {}
+  try { localStorage.setItem("base2", b.dataset.b); } catch (e) {}
+  const m = $("mapmsg"); if (m) m.classList.remove("show");
   setBase(b.dataset.b);
+  if (EVENTS.length) render();
 });
 $("sheetBtn").onclick = () => $("panel").classList.toggle("collapsed");
 

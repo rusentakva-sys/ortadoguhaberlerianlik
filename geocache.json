@@ -89,5 +89,9 @@
 "doj": null,
 "possible unexploded ordnance": null,
 "north": null,
-"israel-lebanon": null
+"israel-lebanon": null,
+"west": {
+"lat": 37.8866,
+"lon": 44.0243
+}
 }

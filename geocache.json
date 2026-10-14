@@ -110,5 +110,9 @@
 "seized explosives": null,
 "israel's intel": null,
 "kiryat gat intel": null,
-"intel": null
+"intel": null,
+"beitar illit": {
+"lat": 31.7019,
+"lon": 35.1073
+}
 }

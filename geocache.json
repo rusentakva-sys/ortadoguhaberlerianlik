@@ -188,5 +188,9 @@
 "zuqar island": null,
 "china’s tibet": null,
 "kenya": null,
-"judea junction": null
+"judea junction": null,
+"tibet": {
+"lat": 41.3054,
+"lon": 42.3883
+}
 }

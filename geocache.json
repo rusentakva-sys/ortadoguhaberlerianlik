@@ -244,5 +244,13 @@
 "lon": 34.8324
 },
 "bosnia": null,
-"colorado": null
+"colorado": null,
+"mecca": {
+"lat": 21.4208,
+"lon": 39.8269
+},
+"netivot": {
+"lat": 31.4214,
+"lon": 34.5884
+}
 }

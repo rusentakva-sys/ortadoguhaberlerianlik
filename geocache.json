@@ -341,5 +341,13 @@
 "international law": null,
 "british": null,
 "nigeria": null,
-"rakhine": null
+"rakhine": null,
+"arab": {
+"lat": 37.509,
+"lon": 57.1057
+},
+"kafr manda": {
+"lat": 32.8114,
+"lon": 35.2598
+}
 }
